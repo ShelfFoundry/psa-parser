@@ -1,3 +1,5 @@
+use crate::{inventory::Inventory, merch::{Merch, MerchDetails}};
+
 pub struct Project {
     pub name: String,
     pub key: String,
@@ -30,9 +32,7 @@ pub struct Project {
     pub date_pending: i32,
     pub date_effective: i32,
     pub date_finished: i32,
-    pub date1: i32,
-    pub date2: i32,
-    pub date3: i32,
+    pub dates: [i32;3],
     pub created_by: String,
     pub modified_by: String,
     pub planogram_specific_inventory: i32,
@@ -63,33 +63,6 @@ pub struct Project {
     pub profit: f32,
     pub profit_allocated: f32,
     pub capacity_unrestricted: i32,
-}
-
-struct Merch {
-    pub x: MerchDetails,
-    pub y: MerchDetails,
-    pub z: MerchDetails,
-}
-
-struct MerchDetails {
-    pub min: i32,
-    pub max: i32,
-    pub uprights: i32,
-    pub caps: i32,
-    pub placement: i32,
-    pub number: i32,
-    pub size: i32,
-    pub direction: i32,
-    pub squeeze: i32,
-}
-
-struct Inventory {
-    pub manual: i32,
-    pub case_multiplier: i32,
-    pub days_supply: i32,
-    pub peak: i32,
-    pub min_units: i32,
-    pub max_units: i32,
 }
 
 impl Project {
@@ -146,6 +119,8 @@ impl Project {
             max_units: values[74].parse().unwrap_or(0),
         };
 
+        let dates = [values[207].parse().unwrap_or(0), values[208].parse().unwrap_or(0), values[209].parse().unwrap_or(0)];
+
         const EMPTY_STRING:String = String::new();
 
         let mut project = Project {
@@ -180,9 +155,7 @@ impl Project {
             date_pending: values[204].parse().unwrap_or(0),
             date_effective: values[205].parse().unwrap_or(0),
             date_finished: values[206].parse().unwrap_or(0),
-            date1: values[207].parse().unwrap_or(0),
-            date2: values[208].parse().unwrap_or(0),
-            date3: values[209].parse().unwrap_or(0),
+            dates,
             created_by: values[210].to_string(),
             modified_by: values[211].to_string(),
             planogram_specific_inventory: values[212].parse().unwrap_or(0),
