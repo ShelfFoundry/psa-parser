@@ -62,14 +62,7 @@ pub struct Planogram {
     pub can_segment: i32,
     pub can_split: i32,
     pub checksums: [String;5],
-    pub number_of_fixtures: i32,
-    pub number_of_segments: i32,
-    pub number_of_drawings: i32,
-    pub warnings_count: i32,
     pub combined_perforamnce_index: f32,
-    pub warning: String,
-    pub warning_number: i32,
-    pub number_of_recommendations: i32,
     pub model_file_name: String,
     pub alloc: Alloc,
     pub pr_status: i32,
@@ -251,13 +244,6 @@ impl Planogram {
             checksums,
             merch,
             inventory,
-            number_of_fixtures: 0,
-            number_of_segments: 0,
-            number_of_drawings: 0,
-            number_of_recommendations: 0,
-            warning: EMPTY_STRING,
-            warnings_count: 0,
-            warning_number: 0,
         };
 
         let mut i = 0;
