@@ -8,6 +8,12 @@ The project does not include proprietary documentation, vendor software, or cust
 
 The implementation is based on independent analysis of PSA files and operational experience with planogram workflows.
 
+## Project Scope
+
+`psa-parser` is an interchange utility for reading PSA files. It is not intended to be a planogram editor, PSA authoring tool, or complete PSA compatibility layer.
+
+The parser may be used by downstream tools to convert PSA input into other data models. PSA writing is not planned.
+
 ## Requirements
 
 - Linux/macOS shell environment
