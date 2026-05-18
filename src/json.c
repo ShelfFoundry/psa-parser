@@ -6,6 +6,48 @@
 
 #define PSA_DEFAULT_MAX_DOCUMENT_BYTES (64u * 1024u * 1024u)
 
+static void set_err(char *errbuf, size_t errbuf_size, const char *msg)
+{
+    if (errbuf && errbuf_size > 0)
+        snprintf(errbuf, errbuf_size, "%s", msg);
+}
+
+static void set_err_for_rc_if_empty(int rc, char *errbuf, size_t errbuf_size)
+{
+    if (!errbuf || errbuf_size == 0 || errbuf[0] != '\0')
+        return;
+
+    switch (rc) {
+        case PSA_ERR_IO:
+            set_err(errbuf, errbuf_size, "I/O error");
+            break;
+        case PSA_ERR_PARSE:
+            set_err(errbuf, errbuf_size, "Parse error");
+            break;
+        case PSA_ERR_ABORT:
+            set_err(errbuf, errbuf_size, "Callback aborted parsing");
+            break;
+        case PSA_ERR_NOMEM:
+            set_err(errbuf, errbuf_size, "Out of memory");
+            break;
+        case PSA_ERR_INVALID_ARG:
+            set_err(errbuf, errbuf_size, "Invalid arguments");
+            break;
+        case PSA_ERR_OVERFLOW:
+            set_err(errbuf, errbuf_size, "Safety limit exceeded");
+            break;
+        case PSA_ERR_NOSPACE:
+            set_err(errbuf, errbuf_size, "Output buffer too small");
+            break;
+        case PSA_ERR_NONFINITE:
+            set_err(errbuf, errbuf_size, "Encountered non-finite numeric value");
+            break;
+        default:
+            set_err(errbuf, errbuf_size, "Unknown JSON error");
+            break;
+    }
+}
+
 typedef struct {
     char *b;
     size_t c;
@@ -459,8 +501,10 @@ int psa_parse_file_to_json_document(const char *path,
                                     size_t *out_needed,
                                     char *errbuf, size_t errbuf_size)
 {
-    if (!path || (out_size > 0 && !out) || (errbuf_size > 0 && !errbuf))
+    if (!path || (out_size > 0 && !out) || (errbuf_size > 0 && !errbuf)) {
+        set_err(errbuf, errbuf_size, "Invalid arguments");
         return PSA_ERR_INVALID_ARG;
+    }
 
     if (errbuf && errbuf_size > 0)
         errbuf[0] = '\0';
@@ -487,6 +531,7 @@ int psa_parse_file_to_json_document(const char *path,
             rc = acc.failed_rc;
         if (rc == PSA_ERR_ABORT && acc.failed_rc == 0 && errbuf && errbuf_size > 0 && errbuf[0] == '\0')
             snprintf(errbuf, errbuf_size, "Failed to build JSON document");
+        set_err_for_rc_if_empty(rc, errbuf, errbuf_size);
         free((void *)header);
         free((void *)version);
         for (int i = 0; i < 9; i++)
@@ -516,5 +561,8 @@ int psa_parse_file_to_json_document(const char *path,
     for (int i = 0; i < 9; i++)
         free(acc.buckets[i].buf);
 
-    return finalize_json(&jb, out, out_size, out_written, out_needed);
+    rc = finalize_json(&jb, out, out_size, out_written, out_needed);
+    if (rc != PSA_OK)
+        set_err_for_rc_if_empty(rc, errbuf, errbuf_size);
+    return rc;
 }

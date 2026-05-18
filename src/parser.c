@@ -16,6 +16,12 @@ static void set_err(char *errbuf, size_t errbuf_size, const char *msg)
         snprintf(errbuf, errbuf_size, "%s", msg);
 }
 
+static void set_err_if_empty(char *errbuf, size_t errbuf_size, const char *msg)
+{
+    if (errbuf && errbuf_size > 0 && errbuf[0] == '\0')
+        snprintf(errbuf, errbuf_size, "%s", msg);
+}
+
 static size_t count_fields_in_line(const char *buf, size_t len)
 {
     size_t n = 1;
@@ -273,6 +279,7 @@ int psa_parse_file_ex(const char *path,
         int cb_rc = cb(&rec, user_data);
         if (cb_rc != 0) {
             rc = PSA_ERR_ABORT;
+            set_err_if_empty(errbuf, errbuf_size, "Callback aborted parsing");
             goto cleanup;
         }
     }
@@ -285,6 +292,32 @@ int psa_parse_file_ex(const char *path,
     }
 
 cleanup:
+    if (rc != PSA_OK && errbuf && errbuf_size > 0 && errbuf[0] == '\0') {
+        switch (rc) {
+            case PSA_ERR_IO:
+                set_err(errbuf, errbuf_size, "I/O error");
+                break;
+            case PSA_ERR_PARSE:
+                set_err(errbuf, errbuf_size, "Parse error");
+                break;
+            case PSA_ERR_ABORT:
+                set_err(errbuf, errbuf_size, "Callback aborted parsing");
+                break;
+            case PSA_ERR_NOMEM:
+                set_err(errbuf, errbuf_size, "Out of memory");
+                break;
+            case PSA_ERR_INVALID_ARG:
+                set_err(errbuf, errbuf_size, "Invalid arguments");
+                break;
+            case PSA_ERR_OVERFLOW:
+                set_err(errbuf, errbuf_size, "Safety limit exceeded");
+                break;
+            default:
+                set_err(errbuf, errbuf_size, "Unknown parser error");
+                break;
+        }
+    }
+
     if (out_header) *out_header = header;
     else free(header);
     if (out_version) *out_version = version;

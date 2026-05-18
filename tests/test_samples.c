@@ -315,6 +315,8 @@ static int test_callback_abort(void)
     rc = psa_parse_file(path, NULL, NULL, abort_cb, &st, errbuf, sizeof(errbuf));
     FAIL_IF(rc != PSA_ERR_ABORT, "expected PSA_ERR_ABORT, got %d", rc);
     FAIL_IF(st.calls != 1, "expected callback to stop after first call, got %d", st.calls);
+    FAIL_IF(strstr(errbuf, "Callback") == NULL,
+            "expected callback abort message, got: %s", errbuf);
 
     unlink(path);
     free(project);
@@ -569,9 +571,12 @@ static int test_invalid_arguments(void)
 
     rc = psa_parse_file(NULL, NULL, NULL, count_cb, NULL, errbuf, sizeof(errbuf));
     FAIL_IF(rc != PSA_ERR_INVALID_ARG, "expected PSA_ERR_INVALID_ARG for NULL path, got %d", rc);
+    FAIL_IF(errbuf[0] == '\0', "expected errbuf for NULL path");
 
+    errbuf[0] = '\0';
     rc = psa_parse_file("/tmp/does_not_matter", NULL, NULL, NULL, NULL, errbuf, sizeof(errbuf));
     FAIL_IF(rc != PSA_ERR_INVALID_ARG, "expected PSA_ERR_INVALID_ARG for NULL callback, got %d", rc);
+    FAIL_IF(errbuf[0] == '\0', "expected errbuf for NULL callback");
 
     rc = psa_record_to_json(NULL, NULL, 0, NULL, NULL);
     FAIL_IF(rc != PSA_ERR_INVALID_ARG, "expected PSA_ERR_INVALID_ARG for NULL record, got %d", rc);
@@ -579,8 +584,10 @@ static int test_invalid_arguments(void)
     rc = psa_file_meta_to_json("h", "v", NULL, 16, NULL, NULL);
     FAIL_IF(rc != PSA_ERR_INVALID_ARG, "expected PSA_ERR_INVALID_ARG for NULL out, got %d", rc);
 
+    errbuf[0] = '\0';
     rc = psa_parse_file_to_json_document(NULL, NULL, 0, NULL, NULL, errbuf, sizeof(errbuf));
     FAIL_IF(rc != PSA_ERR_INVALID_ARG, "expected PSA_ERR_INVALID_ARG for NULL path in doc API, got %d", rc);
+    FAIL_IF(errbuf[0] == '\0', "expected errbuf for doc API invalid args");
 
     return 0;
 }
