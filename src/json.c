@@ -6,6 +6,10 @@
 
 #define PSA_DEFAULT_MAX_DOCUMENT_BYTES (64u * 1024u * 1024u)
 
+/* ======================================================================== */
+/* Error helpers                                                            */
+/* ======================================================================== */
+
 static void set_err(char *errbuf, size_t errbuf_size, const char *msg)
 {
     if (errbuf && errbuf_size > 0)
@@ -48,37 +52,42 @@ static void set_err_for_rc_if_empty(int rc, char *errbuf, size_t errbuf_size)
     }
 }
 
+/* ======================================================================== */
+/* JSON output buffer                                                       */
+/* ======================================================================== */
+
 typedef struct {
-    char *b;
-    size_t c;
-    size_t needed;
-    int err;
-} jb_t;
+    char   *buf;
+    size_t  cap;
+    size_t  len;
+    int     err;
+    int     needs_comma;
+} json_buf_t;
 
-static void jappend_raw(jb_t *j, const char *s, size_t n)
+static void json_buf_append_bytes(json_buf_t *b, const char *s, size_t n)
 {
-    if (j->err != PSA_OK)
+    if (b->err != PSA_OK)
         return;
 
-    if (j->needed > SIZE_MAX - n) {
-        j->err = PSA_ERR_OVERFLOW;
-        return;
-    }
-
-    size_t start = j->needed;
-    j->needed += n;
-
-    if (!j->b || j->c == 0)
-        return;
-
-    if (start >= j->c) {
-        j->err = PSA_ERR_NOSPACE;
+    if (b->len > SIZE_MAX - n) {
+        b->err = PSA_ERR_OVERFLOW;
         return;
     }
 
-    size_t avail = j->c - start;
+    size_t start = b->len;
+    b->len += n;
+
+    if (!b->buf || b->cap == 0)
+        return;
+
+    if (start >= b->cap) {
+        b->err = PSA_ERR_NOSPACE;
+        return;
+    }
+
+    size_t avail = b->cap - start;
     if (avail <= 1) {
-        j->err = PSA_ERR_NOSPACE;
+        b->err = PSA_ERR_NOSPACE;
         return;
     }
 
@@ -86,273 +95,736 @@ static void jappend_raw(jb_t *j, const char *s, size_t n)
     if (to_copy > avail - 1)
         to_copy = avail - 1;
 
-    memcpy(j->b + start, s, to_copy);
-    j->b[start + to_copy] = '\0';
+    memcpy(b->buf + start, s, to_copy);
+    b->buf[start + to_copy] = '\0';
 
     if (to_copy < n)
-        j->err = PSA_ERR_NOSPACE;
+        b->err = PSA_ERR_NOSPACE;
 }
 
-static void japp(jb_t *j, const char *s) { jappend_raw(j, s, strlen(s)); }
-static void jch(jb_t *j, char c) { jappend_raw(j, &c, 1); }
+static void json_buf_append_char(json_buf_t *b, char c)
+{
+    json_buf_append_bytes(b, &c, 1);
+}
 
-static void jint(jb_t *j, int v)
+static void json_buf_append_cstr(json_buf_t *b, const char *s)
+{
+    if (!s)
+        return;
+    json_buf_append_bytes(b, s, strlen(s));
+}
+
+static void json_buf_append_int(json_buf_t *b, int v)
 {
     char t[32];
     int n = snprintf(t, sizeof(t), "%d", v);
     if (n < 0 || (size_t)n >= sizeof(t)) {
-        j->err = PSA_ERR_OVERFLOW;
+        b->err = PSA_ERR_OVERFLOW;
         return;
     }
-    jappend_raw(j, t, (size_t)n);
+    json_buf_append_bytes(b, t, (size_t)n);
 }
 
-static void ji64(jb_t *j, int64_t v)
+static void json_buf_append_int64(json_buf_t *b, int64_t v)
 {
     char t[32];
     int n = snprintf(t, sizeof(t), "%lld", (long long)v);
     if (n < 0 || (size_t)n >= sizeof(t)) {
-        j->err = PSA_ERR_OVERFLOW;
+        b->err = PSA_ERR_OVERFLOW;
         return;
     }
-    jappend_raw(j, t, (size_t)n);
+    json_buf_append_bytes(b, t, (size_t)n);
 }
 
-static void jdbl(jb_t *j, double v)
+static void json_buf_append_double(json_buf_t *b, double v)
 {
     if (!isfinite(v)) {
-        j->err = PSA_ERR_NONFINITE;
+        b->err = PSA_ERR_NONFINITE;
         return;
     }
 
     char t[64];
     int n = snprintf(t, sizeof(t), "%.15g", v);
     if (n < 0 || (size_t)n >= sizeof(t)) {
-        j->err = PSA_ERR_OVERFLOW;
+        b->err = PSA_ERR_OVERFLOW;
         return;
     }
-    jappend_raw(j, t, (size_t)n);
+    json_buf_append_bytes(b, t, (size_t)n);
 }
 
-static void jesc(jb_t *j, const char *s)
+static void json_buf_append_escaped(json_buf_t *b, const char *s)
 {
     if (!s)
         return;
 
     for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
         unsigned char c = *p;
-        if (c == '"') japp(j, "\\\"");
-        else if (c == '\\') japp(j, "\\\\");
-        else if (c == '\b') japp(j, "\\b");
-        else if (c == '\f') japp(j, "\\f");
-        else if (c == '\n') japp(j, "\\n");
-        else if (c == '\r') japp(j, "\\r");
-        else if (c == '\t') japp(j, "\\t");
-        else if (c < 0x20) {
+        if (c == '"') {
+            json_buf_append_cstr(b, "\\\"");
+        } else if (c == '\\') {
+            json_buf_append_cstr(b, "\\\\");
+        } else if (c == '\b') {
+            json_buf_append_cstr(b, "\\b");
+        } else if (c == '\f') {
+            json_buf_append_cstr(b, "\\f");
+        } else if (c == '\n') {
+            json_buf_append_cstr(b, "\\n");
+        } else if (c == '\r') {
+            json_buf_append_cstr(b, "\\r");
+        } else if (c == '\t') {
+            json_buf_append_cstr(b, "\\t");
+        } else if (c < 0x20) {
             char t[8];
             int n = snprintf(t, sizeof(t), "\\u%04x", c);
             if (n < 0 || (size_t)n >= sizeof(t)) {
-                j->err = PSA_ERR_OVERFLOW;
+                b->err = PSA_ERR_OVERFLOW;
                 return;
             }
-            jappend_raw(j, t, (size_t)n);
+            json_buf_append_bytes(b, t, (size_t)n);
         } else {
-            jch(j, (char)c);
+            json_buf_append_char(b, (char)c);
         }
-        if (j->err != PSA_OK)
+        if (b->err != PSA_OK)
             return;
     }
 }
 
-#define J(s) do { japp(j, (s)); if (j->err != PSA_OK) return j->err; } while (0)
-#define K(k) do { J("\""); J((k)); J("\":"); } while (0)
-#define V(s) do { J("\""); jesc(j, (s)); if (j->err != PSA_OK) return j->err; J("\""); } while (0)
-#define I(v) do { jint(j, (v)); if (j->err != PSA_OK) return j->err; } while (0)
-#define D(v) do { jdbl(j, (v)); if (j->err != PSA_OK) return j->err; } while (0)
-#define I6(v) do { ji64(j, (v)); if (j->err != PSA_OK) return j->err; } while (0)
-#define AI(a,n) do { J("["); for (int _i = 0; _i < (n); _i++) { if (_i) J(","); I((a)[_i]); } J("]"); } while (0)
-#define AD(a,n) do { J("["); for (int _i = 0; _i < (n); _i++) { if (_i) J(","); D((a)[_i]); } J("]"); } while (0)
-#define AS(a,n) do { J("["); for (int _i = 0; _i < (n); _i++) { if (_i) J(","); V((a)[_i]); } J("]"); } while (0)
-#define A6(a,n) do { J("["); for (int _i = 0; _i < (n); _i++) { if (_i) J(","); I6((a)[_i]); } J("]"); } while (0)
+/* ======================================================================== */
+/* JSON structural helpers                                                  */
+/* ======================================================================== */
 
-static int j_project(jb_t *j, const psa_project_t *p) {
-J("{");K("type");V("Project");J(",");K("display_name");V(p->display_name);J(",");K("key_text");V(p->key_text);J(",");
-K("primary_key");I(p->primary_key);J(",");K("layout_file");V(p->layout_file);J(",");K("movement_period");I(p->movement_period);J(",");
-K("case_multiple");D(p->case_multiple);J(",");K("days_supply");D(p->days_supply);J(",");K("demand_cycle");I(p->demand_cycle);J(",");
-K("peak_safety");D(p->peak_safety);J(",");K("backroom_stock");D(p->backroom_stock);J(",");K("peg_profile");V(p->peg_profile);J(",");
-K("measurement_mode");I(p->measurement_mode);J(",");K("num_stores");I(p->num_stores);J(",");
-K("merch_x");AI(p->merch_x,9);J(",");K("merch_y");AI(p->merch_y,9);J(",");K("merch_z");AI(p->merch_z,9);J(",");
-K("demand");AD(p->demand,28);J(",");K("inv_model_opts");AI(p->inv_model_opts,6);J(",");
-K("num_ext");AD(p->num_ext,PSA_PROJECT_NUM_SLOTS);J(",");K("text_ext");AS(p->text_ext,PSA_PROJECT_TEXT_SLOTS);J(",");
-K("flag_ext");AI(p->flag_ext,PSA_PROJECT_FLAG_SLOTS);J(",");
-K("notes");V(p->notes);J(",");K("changed");I(p->changed);J(",");K("ext_db_keys");A6(p->ext_db_keys,10);J(",");
-K("perf_override");AI(p->perf_override,4);J(",");K("status");V(p->status);J(",");K("date_slots");AI(p->date_slots,8);J(",");
-K("created_by");V(p->created_by);J(",");K("modified_by");V(p->modified_by);J(",");K("inv_mode");I(p->inv_mode);J(",");
-K("delivery_schedule");V(p->delivery_schedule);J(",");K("custom_payload");V(p->custom_payload);J(",");K("family_key");I(p->family_key);
-J("}");return PSA_OK;
+static void json_write_object_start(json_buf_t *b)
+{
+    json_buf_append_char(b, '{');
+    b->needs_comma = 0;
 }
 
-static int j_planogram(jb_t *j, const psa_planogram_t *p) {
-J("{");K("type");V("Planogram");J(",");K("name");V(p->name);J(",");K("key_text");V(p->key_text);J(",");
-K("width");D(p->width);J(",");K("height");D(p->height);J(",");K("depth");D(p->depth);J(",");
-K("display_color");I(p->display_color);J(",");K("back_depth");D(p->back_depth);J(",");K("draw_back");I(p->draw_back);J(",");
-K("base_width");D(p->base_width);J(",");K("base_height");D(p->base_height);J(",");K("base_depth");D(p->base_depth);J(",");
-K("draw_base");I(p->draw_base);J(",");K("base_color");I(p->base_color);J(",");
-K("notch_peg");AD(p->notch_peg,8);J(",");K("traffic_flow");I(p->traffic_flow);J(",");K("auto_created");I(p->auto_created);J(",");
-K("shape_ref");V(p->shape_ref);J(",");K("bitmap_ref");V(p->bitmap_ref);J(",");
-K("merch_x");AI(p->merch_x,9);J(",");K("merch_y");AI(p->merch_y,9);J(",");K("merch_z");AI(p->merch_z,9);J(",");
-K("combined_perf");D(p->combined_perf);J(",");K("store_count");I(p->store_count);J(",");K("notch_width");D(p->notch_width);J(",");
-K("text_ext");AS(p->text_ext,PSA_PLANOGRAM_TEXT_SLOTS);J(",");K("num_ext");AD(p->num_ext,PSA_PLANOGRAM_NUM_SLOTS);J(",");
-K("flag_ext");AI(p->flag_ext,PSA_PLANOGRAM_FLAG_SLOTS);J(",");
-K("fill_pattern");I(p->fill_pattern);J(",");K("printable_segments");V(p->printable_segments);J(",");K("source_file");V(p->source_file);J(",");
-K("changed");I(p->changed);J(",");K("layout_file");V(p->layout_file);J(",");K("notes");V(p->notes);J(",");
-K("ext_db_keys");A6(p->ext_db_keys,10);J(",");K("source_type");I(p->source_type);J(",");
-K("status");AS(p->status,3);J(",");K("date_slots");AI(p->date_slots,8);J(",");
-K("created_by");V(p->created_by);J(",");K("modified_by");V(p->modified_by);J(",");K("floor_bitmap_ref");V(p->floor_bitmap_ref);J(",");
-K("door_transparency");D(p->door_transparency);J(",");K("floor_tile_width");D(p->floor_tile_width);J(",");K("floor_tile_depth");D(p->floor_tile_depth);J(",");
-K("inv_model_opts");AI(p->inv_model_opts,6);J(",");K("case_multiple");D(p->case_multiple);J(",");K("days_supply");D(p->days_supply);J(",");
-K("demand_cycle");I(p->demand_cycle);J(",");K("peak_safety");D(p->peak_safety);J(",");K("backroom_stock");D(p->backroom_stock);J(",");
-K("demand");AD(p->demand,7);J(",");K("delivery_schedule");V(p->delivery_schedule);J(",");K("business_id");V(p->business_id);J(",");
-K("department");V(p->department);J(",");K("part_id");V(p->part_id);J(",");K("gln_code");V(p->gln_code);J(",");
-K("custom_payload");V(p->custom_payload);J(",");K("guid");V(p->guid);J(",");K("db_guid");V(p->db_guid);J(",");
-K("abbrev_name");V(p->abbrev_name);J(",");K("category");V(p->category);J(",");K("subcategory");V(p->subcategory);J(",");
-K("opt_source_code");I(p->opt_source_code);J(",");K("allocation_group");V(p->allocation_group);J(",");K("allocation_sequence");I(p->allocation_sequence);J(",");K("alloc_min_target");D(p->alloc_min_target);J(",");
-K("alloc_max_target");D(p->alloc_max_target);J(",");K("split_ctrl");I(p->split_ctrl);J(",");K("segment_ctrl");I(p->segment_ctrl);J(",");K("status_ctrl");I(p->status_ctrl);J(",");K("score_ctrl");I(p->score_ctrl);J(",");
-K("warning_count");I(p->warning_count);J(",");K("error_count");I(p->error_count);J(",");K("action_text");V(p->action_text);J(",");K("stage_limit");I(p->stage_limit);J(",");
-K("type_ref");I(p->type_ref);J(",");K("model_ref");I(p->model_ref);J(",");K("family_ref");I(p->family_ref);J(",");K("version_ref");I(p->version_ref);J(",");K("parent_ref");I(p->parent_ref);J(",");
-K("processing_ts");I(p->processing_ts);J(",");K("server_text");V(p->server_text);J(",");K("final_status");I(p->final_status);
-J("}");return PSA_OK;
+static void json_write_object_end(json_buf_t *b)
+{
+    json_buf_append_char(b, '}');
+    b->needs_comma = 0;
 }
 
-static int j_fixture(jb_t *j, const psa_fixture_t *p) {
-J("{");K("type");V("Fixture");J(",");K("planogram_key");I(p->planogram_key);J(",");
-K("type_code");I(p->type_code);J(",");K("name");V(p->name);J(",");K("key_text");V(p->key_text);J(",");
-K("x");D(p->x);J(",");K("width");D(p->width);J(",");K("y");D(p->y);J(",");K("height");D(p->height);J(",");K("z");D(p->z);J(",");K("depth");D(p->depth);J(",");
-K("slope");D(p->slope);J(",");K("angle");D(p->angle);J(",");K("roll");D(p->roll);J(",");K("color");I(p->color);J(",");K("assembly");V(p->assembly);J(",");
-K("fixture_params");AD(p->fixture_params,9);J(",");K("collision_fixtures");I(p->collision_fixtures);J(",");K("collision_positions");I(p->collision_positions);J(",");K("can_obstruct");I(p->can_obstruct);J(",");
-K("overhang");AD(p->overhang,6);J(",");K("default_merch_style");I(p->default_merch_style);J(",");K("divider_dim");AD(p->divider_dim,3);J(",");K("combinable");I(p->combinable);J(",");
-K("grille_notch_peg");AD(p->grille_notch_peg,7);J(",");K("primary_label");V(p->primary_label);J(",");K("secondary_label");V(p->secondary_label);J(",");K("shape_ref");V(p->shape_ref);J(",");K("bitmap_ref");V(p->bitmap_ref);J(",");
-K("merch_x");AI(p->merch_x,9);J(",");K("merch_y");AI(p->merch_y,9);J(",");K("merch_z");AI(p->merch_z,9);J(",");
-K("text_ext");AS(p->text_ext,PSA_FIXTURE_TEXT_SLOTS);J(",");K("num_ext");AD(p->num_ext,PSA_FIXTURE_NUM_SLOTS);J(",");K("flag_ext");AI(p->flag_ext,PSA_FIXTURE_FLAG_SLOTS);J(",");
-K("location_id");I(p->location_id);J(",");K("fill_pattern");I(p->fill_pattern);J(",");K("model_file");V(p->model_file);J(",");K("weight_capacity");D(p->weight_capacity);J(",");K("changed");I(p->changed);J(",");
-K("divider_placement");AI(p->divider_placement,3);J(",");K("transparency");D(p->transparency);J(",");K("hide_when_printing");I(p->hide_when_printing);J(",");K("product_assoc");V(p->product_assoc);J(",");K("part_id");V(p->part_id);J(",");
-K("hide_view_dims");I(p->hide_view_dims);J(",");K("gln_code");V(p->gln_code);
-J("}");return PSA_OK;
+static void json_write_key(json_buf_t *b, const char *key)
+{
+    if (b->err != PSA_OK)
+        return;
+    if (b->needs_comma)
+        json_buf_append_char(b, ',');
+    json_buf_append_char(b, '"');
+    json_buf_append_cstr(b, key);
+    json_buf_append_char(b, '"');
+    json_buf_append_char(b, ':');
+    b->needs_comma = 1;
 }
 
-static int j_product(jb_t *j, const psa_product_t *p) {
-J("{");K("type");V("Product");J(",");K("upc");V(p->upc);J(",");K("business_id");V(p->business_id);J(",");K("name");V(p->name);J(",");K("key_text");V(p->key_text);J(",");
-K("width");D(p->width);J(",");K("height");D(p->height);J(",");K("depth");D(p->depth);J(",");K("color");I(p->color);J(",");K("abbrev_name");V(p->abbrev_name);J(",");K("size");D(p->size);J(",");
-K("uom");V(p->uom);J(",");K("manufacturer");V(p->manufacturer);J(",");K("category");V(p->category);J(",");K("supplier");V(p->supplier);J(",");K("inner_pack_qty");I(p->inner_pack_qty);J(",");
-K("nesting_x");D(p->nesting_x);J(",");K("nesting_y");D(p->nesting_y);J(",");K("nesting_z");D(p->nesting_z);J(",");K("peg_hole_count");I(p->peg_hole_count);J(",");
-K("peg_hole_geom");AD(p->peg_hole_geom,9);J(",");K("packaging_style");I(p->packaging_style);J(",");K("peg_profile");V(p->peg_profile);J(",");
-K("finger_space_y");D(p->finger_space_y);J(",");K("jumble_factor");D(p->jumble_factor);J(",");K("price");D(p->price);J(",");K("case_cost");D(p->case_cost);J(",");K("tax_code");I(p->tax_code);J(",");
-K("unit_movement");D(p->unit_movement);J(",");K("share");D(p->share);J(",");K("case_multiple");D(p->case_multiple);J(",");K("days_supply");D(p->days_supply);J(",");K("combined_perf");D(p->combined_perf);J(",");
-K("peg_span");I(p->peg_span);J(",");K("min_units");I(p->min_units);J(",");K("max_units");I(p->max_units);J(",");K("shape_ref");V(p->shape_ref);J(",");K("bitmap_ref");V(p->bitmap_ref);J(",");
-K("tray");AD(p->tray,8);J(",");K("case_pack");AD(p->case_pack,8);J(",");K("display");AD(p->display,8);J(",");K("alternate");AD(p->alternate,8);J(",");K("loose");AD(p->loose,8);J(",");
-K("merch_xyz");AI(p->merch_xyz,27);J(",");K("num_positions");I(p->num_positions);J(",");
-K("text_ext");AS(p->text_ext,PSA_PRODUCT_TEXT_SLOTS);J(",");K("num_ext");AD(p->num_ext,PSA_PRODUCT_NUM_SLOTS);J(",");K("flag_ext");AI(p->flag_ext,PSA_PRODUCT_FLAG_SLOTS);J(",");
-K("squeeze_min_x");D(p->squeeze_min_x);J(",");K("squeeze_max_x");D(p->squeeze_max_x);J(",");K("squeeze_min_y");D(p->squeeze_min_y);J(",");K("squeeze_max_y");D(p->squeeze_max_y);J(",");K("squeeze_min_z");D(p->squeeze_min_z);J(",");K("squeeze_max_z");D(p->squeeze_max_z);J(",");
-K("fill_pattern");I(p->fill_pattern);J(",");K("model_file");V(p->model_file);J(",");K("brand");V(p->brand);J(",");K("subcategory");V(p->subcategory);J(",");K("weight");D(p->weight);J(",");K("planogram_alias");V(p->planogram_alias);J(",");
-K("changed");I(p->changed);J(",");K("front_overhang");D(p->front_overhang);J(",");K("finger_space_x");D(p->finger_space_x);J(",");K("ext_db_keys");A6(p->ext_db_keys,10);J(",");K("status");V(p->status);J(",");
-K("date_slots");AI(p->date_slots,8);J(",");K("created_by");V(p->created_by);J(",");K("modified_by");V(p->modified_by);J(",");
-K("transparency");D(p->transparency);J(",");K("peak_safety");D(p->peak_safety);J(",");K("backroom_stock");D(p->backroom_stock);J(",");K("delivery_schedule");V(p->delivery_schedule);J(",");K("part_id");V(p->part_id);J(",");
-K("authority_level");I(p->authority_level);J(",");K("bitmap_unit_override");I(p->bitmap_unit_override);J(",");K("model_lookup_mode");I(p->model_lookup_mode);J(",");K("default_merch_style");I(p->default_merch_style);J(",");K("auto_model");I(p->auto_model);J(",");
-K("custom_payload");V(p->custom_payload);J(",");K("db_guid");V(p->db_guid);J(",");K("source_code");I(p->source_code);J(",");K("technical_key");I6(p->technical_key);
-J("}");return PSA_OK;
+static void json_write_field_str(json_buf_t *b, const char *key, const char *val)
+{
+    json_write_key(b, key);
+    json_buf_append_char(b, '"');
+    json_buf_append_escaped(b, val);
+    json_buf_append_char(b, '"');
 }
 
-static int j_position(jb_t *j, const psa_position_t *p) {
-J("{");K("type");V("Position");J(",");K("planogram_key");I(p->planogram_key);J(",");
-K("upc");V(p->upc);J(",");K("business_id");V(p->business_id);J(",");K("key_text");V(p->key_text);J(",");
-K("x");D(p->x);J(",");K("width");D(p->width);J(",");K("y");D(p->y);J(",");K("height");D(p->height);J(",");K("z");D(p->z);J(",");K("depth");D(p->depth);J(",");
-K("slope");D(p->slope);J(",");K("angle");D(p->angle);J(",");K("roll");D(p->roll);J(",");K("merch_style");I(p->merch_style);J(",");
-K("h_facing");I(p->h_facing);J(",");K("v_facing");I(p->v_facing);J(",");K("d_facing");I(p->d_facing);J(",");
-K("x_cap");AI(p->x_cap,4);J(",");K("y_cap");AI(p->y_cap,4);J(",");K("z_cap");AI(p->z_cap,4);J(",");
-K("orientation");I(p->orientation);J(",");
-K("jumble_x");D(p->jumble_x);J(",");K("jumble_y");D(p->jumble_y);J(",");K("jumble_z");D(p->jumble_z);J(",");
-K("merch_dim_x");D(p->merch_dim_x);J(",");K("merch_dim_y");D(p->merch_dim_y);J(",");K("merch_dim_z");D(p->merch_dim_z);J(",");
-K("full_dim_x");D(p->full_dim_x);J(",");K("full_dim_y");D(p->full_dim_y);J(",");K("full_dim_z");D(p->full_dim_z);J(",");
-K("subunit_x");I(p->subunit_x);J(",");K("subunit_y");I(p->subunit_y);J(",");K("subunit_z");I(p->subunit_z);J(",");K("peg_profile");V(p->peg_profile);J(",");
-K("manual_units");I(p->manual_units);J(",");K("rank_x");I(p->rank_x);J(",");K("rank_y");I(p->rank_y);J(",");K("rank_z");I(p->rank_z);J(",");K("peg_span");I(p->peg_span);J(",");K("always_float");I(p->always_float);J(",");
-K("primary_label");V(p->primary_label);J(",");K("secondary_label");V(p->secondary_label);J(",");
-K("merch_xyz");AI(p->merch_xyz,27);J(",");
-K("text_ext");AS(p->text_ext,PSA_POSITION_TEXT_SLOTS);J(",");K("num_ext");AD(p->num_ext,PSA_POSITION_NUM_SLOTS);J(",");K("flag_ext");AI(p->flag_ext,PSA_POSITION_FLAG_SLOTS);J(",");
-K("target_space_x");I(p->target_space_x);J(",");K("target_space_y");I(p->target_space_y);J(",");K("target_space_z");I(p->target_space_z);J(",");
-K("target_val_x");D(p->target_val_x);J(",");K("target_val_y");D(p->target_val_y);J(",");K("target_val_z");D(p->target_val_z);J(",");
-K("location_id");I(p->location_id);J(",");K("changed");I(p->changed);J(",");K("replenishment_min");I(p->replenishment_min);J(",");K("replenishment_max");I(p->replenishment_max);J(",");
-K("shape_ref");V(p->shape_ref);J(",");K("bitmap_ref");V(p->bitmap_ref);J(",");K("hide_when_printing");I(p->hide_when_printing);J(",");K("part_id");V(p->part_id);J(",");
-K("bitmap_unit_override");I(p->bitmap_unit_override);J(",");K("auto_model");I(p->auto_model);J(",");K("custom_payload");V(p->custom_payload);J(",");
-K("x_cap_includes_units");I(p->x_cap_includes_units);J(",");K("y_cap_includes_units");I(p->y_cap_includes_units);
-J("}");return PSA_OK;
+static void json_write_field_int(json_buf_t *b, const char *key, int val)
+{
+    json_write_key(b, key);
+    json_buf_append_int(b, val);
 }
 
-static int j_performance(jb_t *j, const psa_performance_t *p) {
-J("{");K("type");V("Performance");J(",");K("upc");V(p->upc);J(",");K("business_id");V(p->business_id);J(",");K("key_text");V(p->key_text);J(",");
-K("price");D(p->price);J(",");K("case_cost");D(p->case_cost);J(",");K("tax_code");I(p->tax_code);J(",");K("unit_movement");D(p->unit_movement);J(",");K("share");D(p->share);J(",");K("combined_perf");D(p->combined_perf);J(",");
-K("text_ext");AS(p->text_ext,PSA_PERF_TEXT_SLOTS);J(",");K("num_ext");AD(p->num_ext,PSA_PERF_NUM_SLOTS);J(",");K("flag_ext");AI(p->flag_ext,PSA_PERF_FLAG_SLOTS);J(",");
-K("changed");I(p->changed);J(",");K("case_multiple");D(p->case_multiple);J(",");K("days_supply");D(p->days_supply);J(",");K("peak_safety");D(p->peak_safety);J(",");K("backroom_stock");D(p->backroom_stock);J(",");
-K("min_units");I(p->min_units);J(",");K("max_units");I(p->max_units);J(",");K("delivery_schedule");V(p->delivery_schedule);J(",");
-K("replenishment_min");I(p->replenishment_min);J(",");K("replenishment_max");I(p->replenishment_max);J(",");K("assortment_rank");I(p->assortment_rank);J(",");K("recommended_facings");I(p->recommended_facings);J(",");
-K("assortment_strategy");V(p->assortment_strategy);J(",");K("assortment_tactic");V(p->assortment_tactic);J(",");K("assortment_reason");V(p->assortment_reason);J(",");K("assortment_action");V(p->assortment_action);J(",");
-K("part_id");V(p->part_id);J(",");K("cluster_name");V(p->cluster_name);J(",");K("target_store_count");I(p->target_store_count);J(",");K("target_dist_percent");D(p->target_dist_percent);J(",");K("assortment_note");V(p->assortment_note);J(",");
-K("custom_payload");V(p->custom_payload);J(",");K("recommended_orientation");I(p->recommended_orientation);J(",");K("recommended_merch_style");I(p->recommended_merch_style);J(",");
-K("ignore_recommendations");I(p->ignore_recommendations);J(",");K("priority_code");I(p->priority_code);J(",");K("priority_desc");V(p->priority_desc);J(",");K("force_list");I(p->force_list);J(",");K("planogram_reason");V(p->planogram_reason);J(",");K("max_stage_reduction");D(p->max_stage_reduction);
-J("}");return PSA_OK;
+static void json_write_field_double(json_buf_t *b, const char *key, double val)
+{
+    json_write_key(b, key);
+    json_buf_append_double(b, val);
 }
 
-static int j_segment(jb_t *j, const psa_segment_t *p) {
-J("{");K("type");V("Segment");J(",");K("planogram_key");I(p->planogram_key);J(",");
-K("name");V(p->name);J(",");K("key_text");V(p->key_text);J(",");K("x");D(p->x);J(",");K("width");D(p->width);J(",");K("y");D(p->y);J(",");K("height");D(p->height);J(",");K("z");D(p->z);J(",");K("depth");D(p->depth);J(",");
-K("angle");D(p->angle);J(",");K("x_offset");D(p->x_offset);J(",");K("y_offset");D(p->y_offset);J(",");
-K("door_flag");I(p->door_flag);J(",");K("door_direction");I(p->door_direction);J(",");
-K("text_ext");AS(p->text_ext,PSA_SEGMENT_TEXT_SLOTS);J(",");K("num_ext");AD(p->num_ext,PSA_SEGMENT_NUM_SLOTS);J(",");K("flag_ext");AI(p->flag_ext,PSA_SEGMENT_FLAG_SLOTS);J(",");
-K("frame_width");D(p->frame_width);J(",");K("frame_height");D(p->frame_height);J(",");K("changed");I(p->changed);J(",");K("frame_color");I(p->frame_color);J(",");K("frame_fill_pattern");I(p->frame_fill_pattern);J(",");
-K("part_id");V(p->part_id);J(",");K("gln_code");V(p->gln_code);J(",");K("custom_payload");V(p->custom_payload);
-J("}");return PSA_OK;
+static void json_write_field_int64(json_buf_t *b, const char *key, int64_t val)
+{
+    json_write_key(b, key);
+    json_buf_append_int64(b, val);
 }
 
-static int j_drawing(jb_t *j, const psa_drawing_t *p) {
-J("{");K("type");V("Drawing");J(",");K("drawing_type");I(p->drawing_type);J(",");K("name");V(p->name);J(",");K("key_text");V(p->key_text);J(",");
-K("x");D(p->x);J(",");K("width");D(p->width);J(",");K("y");D(p->y);J(",");K("height");D(p->height);J(",");K("z");D(p->z);J(",");K("depth");D(p->depth);J(",");
-K("fg_color");I(p->fg_color);J(",");K("bg_fill");I(p->bg_fill);J(",");K("bg_color");I(p->bg_color);J(",");K("created_in_view");I(p->created_in_view);J(",");K("show_in_all_views");I(p->show_in_all_views);J(",");
-K("word_wrap");I(p->word_wrap);J(",");K("circular");I(p->circular);J(",");
-K("start_x");D(p->start_x);J(",");K("start_y");D(p->start_y);J(",");K("start_z");D(p->start_z);J(",");K("end_x");D(p->end_x);J(",");K("end_y");D(p->end_y);J(",");K("end_z");D(p->end_z);J(",");
-K("text");V(p->text);J(",");K("text_scale");I(p->text_scale);J(",");K("outline");I(p->outline);J(",");K("callout");I(p->callout);J(",");
-K("font_metrics");A6(p->font_metrics,5);J(",");K("font_style");AI(p->font_style,8);J(",");K("font_face");V(p->font_face);J(",");
-K("anchor_x");D(p->anchor_x);J(",");K("anchor_y");D(p->anchor_y);J(",");K("anchor_z");D(p->anchor_z);J(",");
-K("center_text");I(p->center_text);J(",");K("changed");I(p->changed);J(",");K("hide_when_printing");I(p->hide_when_printing);J(",");K("custom_payload");V(p->custom_payload);
-J("}");return PSA_OK;
+static void json_write_field_int_array(json_buf_t *b, const char *key,
+                                       const int *arr, int n)
+{
+    json_write_key(b, key);
+    json_buf_append_char(b, '[');
+    for (int i = 0; i < n; i++) {
+        if (i > 0)
+            json_buf_append_char(b, ',');
+        json_buf_append_int(b, arr[i]);
+    }
+    json_buf_append_char(b, ']');
 }
 
-static int j_divider(jb_t *j, const psa_divider_t *p) {
-J("{");K("type");V("Divider");J(",");K("id");V(p->id);J(",");K("x");D(p->x);J(",");K("width");D(p->width);J(",");K("y");D(p->y);J(",");K("height");D(p->height);J(",");K("z");D(p->z);J(",");K("depth");D(p->depth);J(",");K("color");I(p->color);J(",");
-K("undef_text_1");V(p->undef_text_1);J(",");K("desc_text_1");V(p->desc_text_1);J(",");K("desc_text_2");V(p->desc_text_2);J(",");K("desc_text_3");V(p->desc_text_3);J(",");
-K("num_1");D(p->num_1);J(",");K("num_2");D(p->num_2);J(",");K("num_3");D(p->num_3);J(",");
-K("undef_text_2");V(p->undef_text_2);J(",");K("undef_text_3");V(p->undef_text_3);
-J("}");return PSA_OK;
+static void json_write_field_double_array(json_buf_t *b, const char *key,
+                                          const double *arr, int n)
+{
+    json_write_key(b, key);
+    json_buf_append_char(b, '[');
+    for (int i = 0; i < n; i++) {
+        if (i > 0)
+            json_buf_append_char(b, ',');
+        json_buf_append_double(b, arr[i]);
+    }
+    json_buf_append_char(b, ']');
 }
 
-static int finalize_json(jb_t *j, char *out, size_t out_size,
-                         size_t *out_written, size_t *out_needed)
+static void json_write_field_int64_array(json_buf_t *b, const char *key,
+                                         const int64_t *arr, int n)
+{
+    json_write_key(b, key);
+    json_buf_append_char(b, '[');
+    for (int i = 0; i < n; i++) {
+        if (i > 0)
+            json_buf_append_char(b, ',');
+        json_buf_append_int64(b, arr[i]);
+    }
+    json_buf_append_char(b, ']');
+}
+
+static void json_write_field_str_array(json_buf_t *b, const char *key,
+                                       const char *const *arr, int n)
+{
+    json_write_key(b, key);
+    json_buf_append_char(b, '[');
+    for (int i = 0; i < n; i++) {
+        if (i > 0)
+            json_buf_append_char(b, ',');
+        json_buf_append_char(b, '"');
+        json_buf_append_escaped(b, arr[i]);
+        json_buf_append_char(b, '"');
+    }
+    json_buf_append_char(b, ']');
+}
+
+/* ======================================================================== */
+/* Per-record serializers                                                   */
+/* ======================================================================== */
+
+static int serialize_project(json_buf_t *b, const psa_project_t *p)
+{
+    json_write_object_start(b);
+    json_write_field_str(b, "type", "Project");
+    json_write_field_str(b, "display_name", p->display_name);
+    json_write_field_str(b, "key_text", p->key_text);
+    json_write_field_int(b, "primary_key", p->primary_key);
+    json_write_field_str(b, "layout_file", p->layout_file);
+    json_write_field_int(b, "movement_period", p->movement_period);
+    json_write_field_double(b, "case_multiple", p->case_multiple);
+    json_write_field_double(b, "days_supply", p->days_supply);
+    json_write_field_int(b, "demand_cycle", p->demand_cycle);
+    json_write_field_double(b, "peak_safety", p->peak_safety);
+    json_write_field_double(b, "backroom_stock", p->backroom_stock);
+    json_write_field_str(b, "peg_profile", p->peg_profile);
+    json_write_field_int(b, "measurement_mode", p->measurement_mode);
+    json_write_field_int(b, "num_stores", p->num_stores);
+    json_write_field_int_array(b, "merch_x", p->merch_x, 9);
+    json_write_field_int_array(b, "merch_y", p->merch_y, 9);
+    json_write_field_int_array(b, "merch_z", p->merch_z, 9);
+    json_write_field_double_array(b, "demand", p->demand, 28);
+    json_write_field_int_array(b, "inv_model_opts", p->inv_model_opts, 6);
+    json_write_field_double_array(b, "num_ext", p->num_ext, PSA_PROJECT_NUM_SLOTS);
+    json_write_field_str_array(b, "text_ext", p->text_ext, PSA_PROJECT_TEXT_SLOTS);
+    json_write_field_int_array(b, "flag_ext", p->flag_ext, PSA_PROJECT_FLAG_SLOTS);
+    json_write_field_str(b, "notes", p->notes);
+    json_write_field_int(b, "changed", p->changed);
+    json_write_field_int64_array(b, "ext_db_keys", p->ext_db_keys, 10);
+    json_write_field_int_array(b, "perf_override", p->perf_override, 4);
+    json_write_field_str(b, "status", p->status);
+    json_write_field_int_array(b, "date_slots", p->date_slots, 8);
+    json_write_field_str(b, "created_by", p->created_by);
+    json_write_field_str(b, "modified_by", p->modified_by);
+    json_write_field_int(b, "inv_mode", p->inv_mode);
+    json_write_field_str(b, "delivery_schedule", p->delivery_schedule);
+    json_write_field_str(b, "custom_payload", p->custom_payload);
+    json_write_field_int(b, "family_key", p->family_key);
+    json_write_object_end(b);
+    return b->err;
+}
+
+static int serialize_planogram(json_buf_t *b, const psa_planogram_t *p)
+{
+    json_write_object_start(b);
+    json_write_field_str(b, "type", "Planogram");
+    json_write_field_str(b, "name", p->name);
+    json_write_field_str(b, "key_text", p->key_text);
+    json_write_field_double(b, "width", p->width);
+    json_write_field_double(b, "height", p->height);
+    json_write_field_double(b, "depth", p->depth);
+    json_write_field_int(b, "display_color", p->display_color);
+    json_write_field_double(b, "back_depth", p->back_depth);
+    json_write_field_int(b, "draw_back", p->draw_back);
+    json_write_field_double(b, "base_width", p->base_width);
+    json_write_field_double(b, "base_height", p->base_height);
+    json_write_field_double(b, "base_depth", p->base_depth);
+    json_write_field_int(b, "draw_base", p->draw_base);
+    json_write_field_int(b, "base_color", p->base_color);
+    json_write_field_double_array(b, "notch_peg", p->notch_peg, 8);
+    json_write_field_int(b, "traffic_flow", p->traffic_flow);
+    json_write_field_int(b, "auto_created", p->auto_created);
+    json_write_field_str(b, "shape_ref", p->shape_ref);
+    json_write_field_str(b, "bitmap_ref", p->bitmap_ref);
+    json_write_field_int_array(b, "merch_x", p->merch_x, 9);
+    json_write_field_int_array(b, "merch_y", p->merch_y, 9);
+    json_write_field_int_array(b, "merch_z", p->merch_z, 9);
+    json_write_field_double(b, "combined_perf", p->combined_perf);
+    json_write_field_int(b, "store_count", p->store_count);
+    json_write_field_double(b, "notch_width", p->notch_width);
+    json_write_field_str_array(b, "text_ext", p->text_ext, PSA_PLANOGRAM_TEXT_SLOTS);
+    json_write_field_double_array(b, "num_ext", p->num_ext, PSA_PLANOGRAM_NUM_SLOTS);
+    json_write_field_int_array(b, "flag_ext", p->flag_ext, PSA_PLANOGRAM_FLAG_SLOTS);
+    json_write_field_int(b, "fill_pattern", p->fill_pattern);
+    json_write_field_str(b, "printable_segments", p->printable_segments);
+    json_write_field_str(b, "source_file", p->source_file);
+    json_write_field_int(b, "changed", p->changed);
+    json_write_field_str(b, "layout_file", p->layout_file);
+    json_write_field_str(b, "notes", p->notes);
+    json_write_field_int64_array(b, "ext_db_keys", p->ext_db_keys, 10);
+    json_write_field_int(b, "source_type", p->source_type);
+    json_write_field_str_array(b, "status", p->status, 3);
+    json_write_field_int_array(b, "date_slots", p->date_slots, 8);
+    json_write_field_str(b, "created_by", p->created_by);
+    json_write_field_str(b, "modified_by", p->modified_by);
+    json_write_field_str(b, "floor_bitmap_ref", p->floor_bitmap_ref);
+    json_write_field_double(b, "door_transparency", p->door_transparency);
+    json_write_field_double(b, "floor_tile_width", p->floor_tile_width);
+    json_write_field_double(b, "floor_tile_depth", p->floor_tile_depth);
+    json_write_field_int_array(b, "inv_model_opts", p->inv_model_opts, 6);
+    json_write_field_double(b, "case_multiple", p->case_multiple);
+    json_write_field_double(b, "days_supply", p->days_supply);
+    json_write_field_int(b, "demand_cycle", p->demand_cycle);
+    json_write_field_double(b, "peak_safety", p->peak_safety);
+    json_write_field_double(b, "backroom_stock", p->backroom_stock);
+    json_write_field_double_array(b, "demand", p->demand, 7);
+    json_write_field_str(b, "delivery_schedule", p->delivery_schedule);
+    json_write_field_str(b, "business_id", p->business_id);
+    json_write_field_str(b, "department", p->department);
+    json_write_field_str(b, "part_id", p->part_id);
+    json_write_field_str(b, "gln_code", p->gln_code);
+    json_write_field_str(b, "custom_payload", p->custom_payload);
+    json_write_field_str(b, "guid", p->guid);
+    json_write_field_str(b, "db_guid", p->db_guid);
+    json_write_field_str(b, "abbrev_name", p->abbrev_name);
+    json_write_field_str(b, "category", p->category);
+    json_write_field_str(b, "subcategory", p->subcategory);
+    json_write_field_int(b, "opt_source_code", p->opt_source_code);
+    json_write_field_str(b, "allocation_group", p->allocation_group);
+    json_write_field_int(b, "allocation_sequence", p->allocation_sequence);
+    json_write_field_double(b, "alloc_min_target", p->alloc_min_target);
+    json_write_field_double(b, "alloc_max_target", p->alloc_max_target);
+    json_write_field_int(b, "split_ctrl", p->split_ctrl);
+    json_write_field_int(b, "segment_ctrl", p->segment_ctrl);
+    json_write_field_int(b, "status_ctrl", p->status_ctrl);
+    json_write_field_int(b, "score_ctrl", p->score_ctrl);
+    json_write_field_int(b, "warning_count", p->warning_count);
+    json_write_field_int(b, "error_count", p->error_count);
+    json_write_field_str(b, "action_text", p->action_text);
+    json_write_field_int(b, "stage_limit", p->stage_limit);
+    json_write_field_int(b, "type_ref", p->type_ref);
+    json_write_field_int(b, "model_ref", p->model_ref);
+    json_write_field_int(b, "family_ref", p->family_ref);
+    json_write_field_int(b, "version_ref", p->version_ref);
+    json_write_field_int(b, "parent_ref", p->parent_ref);
+    json_write_field_int(b, "processing_ts", p->processing_ts);
+    json_write_field_str(b, "server_text", p->server_text);
+    json_write_field_int(b, "final_status", p->final_status);
+    json_write_object_end(b);
+    return b->err;
+}
+
+static int serialize_fixture(json_buf_t *b, const psa_fixture_t *p)
+{
+    json_write_object_start(b);
+    json_write_field_str(b, "type", "Fixture");
+    json_write_field_int(b, "planogram_key", p->planogram_key);
+    json_write_field_int(b, "type_code", p->type_code);
+    json_write_field_str(b, "name", p->name);
+    json_write_field_str(b, "key_text", p->key_text);
+    json_write_field_double(b, "x", p->x);
+    json_write_field_double(b, "width", p->width);
+    json_write_field_double(b, "y", p->y);
+    json_write_field_double(b, "height", p->height);
+    json_write_field_double(b, "z", p->z);
+    json_write_field_double(b, "depth", p->depth);
+    json_write_field_double(b, "slope", p->slope);
+    json_write_field_double(b, "angle", p->angle);
+    json_write_field_double(b, "roll", p->roll);
+    json_write_field_int(b, "color", p->color);
+    json_write_field_str(b, "assembly", p->assembly);
+    json_write_field_double_array(b, "fixture_params", p->fixture_params, 9);
+    json_write_field_int(b, "collision_fixtures", p->collision_fixtures);
+    json_write_field_int(b, "collision_positions", p->collision_positions);
+    json_write_field_int(b, "can_obstruct", p->can_obstruct);
+    json_write_field_double_array(b, "overhang", p->overhang, 6);
+    json_write_field_int(b, "default_merch_style", p->default_merch_style);
+    json_write_field_double_array(b, "divider_dim", p->divider_dim, 3);
+    json_write_field_int(b, "combinable", p->combinable);
+    json_write_field_double_array(b, "grille_notch_peg", p->grille_notch_peg, 7);
+    json_write_field_str(b, "primary_label", p->primary_label);
+    json_write_field_str(b, "secondary_label", p->secondary_label);
+    json_write_field_str(b, "shape_ref", p->shape_ref);
+    json_write_field_str(b, "bitmap_ref", p->bitmap_ref);
+    json_write_field_int_array(b, "merch_x", p->merch_x, 9);
+    json_write_field_int_array(b, "merch_y", p->merch_y, 9);
+    json_write_field_int_array(b, "merch_z", p->merch_z, 9);
+    json_write_field_str_array(b, "text_ext", p->text_ext, PSA_FIXTURE_TEXT_SLOTS);
+    json_write_field_double_array(b, "num_ext", p->num_ext, PSA_FIXTURE_NUM_SLOTS);
+    json_write_field_int_array(b, "flag_ext", p->flag_ext, PSA_FIXTURE_FLAG_SLOTS);
+    json_write_field_int(b, "location_id", p->location_id);
+    json_write_field_int(b, "fill_pattern", p->fill_pattern);
+    json_write_field_str(b, "model_file", p->model_file);
+    json_write_field_double(b, "weight_capacity", p->weight_capacity);
+    json_write_field_int(b, "changed", p->changed);
+    json_write_field_int_array(b, "divider_placement", p->divider_placement, 3);
+    json_write_field_double(b, "transparency", p->transparency);
+    json_write_field_int(b, "hide_when_printing", p->hide_when_printing);
+    json_write_field_str(b, "product_assoc", p->product_assoc);
+    json_write_field_str(b, "part_id", p->part_id);
+    json_write_field_int(b, "hide_view_dims", p->hide_view_dims);
+    json_write_field_str(b, "gln_code", p->gln_code);
+    json_write_object_end(b);
+    return b->err;
+}
+
+static int serialize_product(json_buf_t *b, const psa_product_t *p)
+{
+    json_write_object_start(b);
+    json_write_field_str(b, "type", "Product");
+    json_write_field_str(b, "upc", p->upc);
+    json_write_field_str(b, "business_id", p->business_id);
+    json_write_field_str(b, "name", p->name);
+    json_write_field_str(b, "key_text", p->key_text);
+    json_write_field_double(b, "width", p->width);
+    json_write_field_double(b, "height", p->height);
+    json_write_field_double(b, "depth", p->depth);
+    json_write_field_int(b, "color", p->color);
+    json_write_field_str(b, "abbrev_name", p->abbrev_name);
+    json_write_field_double(b, "size", p->size);
+    json_write_field_str(b, "uom", p->uom);
+    json_write_field_str(b, "manufacturer", p->manufacturer);
+    json_write_field_str(b, "category", p->category);
+    json_write_field_str(b, "supplier", p->supplier);
+    json_write_field_int(b, "inner_pack_qty", p->inner_pack_qty);
+    json_write_field_double(b, "nesting_x", p->nesting_x);
+    json_write_field_double(b, "nesting_y", p->nesting_y);
+    json_write_field_double(b, "nesting_z", p->nesting_z);
+    json_write_field_int(b, "peg_hole_count", p->peg_hole_count);
+    json_write_field_double_array(b, "peg_hole_geom", p->peg_hole_geom, 9);
+    json_write_field_int(b, "packaging_style", p->packaging_style);
+    json_write_field_str(b, "peg_profile", p->peg_profile);
+    json_write_field_double(b, "finger_space_y", p->finger_space_y);
+    json_write_field_double(b, "jumble_factor", p->jumble_factor);
+    json_write_field_double(b, "price", p->price);
+    json_write_field_double(b, "case_cost", p->case_cost);
+    json_write_field_int(b, "tax_code", p->tax_code);
+    json_write_field_double(b, "unit_movement", p->unit_movement);
+    json_write_field_double(b, "share", p->share);
+    json_write_field_double(b, "case_multiple", p->case_multiple);
+    json_write_field_double(b, "days_supply", p->days_supply);
+    json_write_field_double(b, "combined_perf", p->combined_perf);
+    json_write_field_int(b, "peg_span", p->peg_span);
+    json_write_field_int(b, "min_units", p->min_units);
+    json_write_field_int(b, "max_units", p->max_units);
+    json_write_field_str(b, "shape_ref", p->shape_ref);
+    json_write_field_str(b, "bitmap_ref", p->bitmap_ref);
+    json_write_field_double_array(b, "tray", p->tray, 8);
+    json_write_field_double_array(b, "case_pack", p->case_pack, 8);
+    json_write_field_double_array(b, "display", p->display, 8);
+    json_write_field_double_array(b, "alternate", p->alternate, 8);
+    json_write_field_double_array(b, "loose", p->loose, 8);
+    json_write_field_int_array(b, "merch_xyz", p->merch_xyz, 27);
+    json_write_field_int(b, "num_positions", p->num_positions);
+    json_write_field_str_array(b, "text_ext", p->text_ext, PSA_PRODUCT_TEXT_SLOTS);
+    json_write_field_double_array(b, "num_ext", p->num_ext, PSA_PRODUCT_NUM_SLOTS);
+    json_write_field_int_array(b, "flag_ext", p->flag_ext, PSA_PRODUCT_FLAG_SLOTS);
+    json_write_field_double(b, "squeeze_min_x", p->squeeze_min_x);
+    json_write_field_double(b, "squeeze_max_x", p->squeeze_max_x);
+    json_write_field_double(b, "squeeze_min_y", p->squeeze_min_y);
+    json_write_field_double(b, "squeeze_max_y", p->squeeze_max_y);
+    json_write_field_double(b, "squeeze_min_z", p->squeeze_min_z);
+    json_write_field_double(b, "squeeze_max_z", p->squeeze_max_z);
+    json_write_field_int(b, "fill_pattern", p->fill_pattern);
+    json_write_field_str(b, "model_file", p->model_file);
+    json_write_field_str(b, "brand", p->brand);
+    json_write_field_str(b, "subcategory", p->subcategory);
+    json_write_field_double(b, "weight", p->weight);
+    json_write_field_str(b, "planogram_alias", p->planogram_alias);
+    json_write_field_int(b, "changed", p->changed);
+    json_write_field_double(b, "front_overhang", p->front_overhang);
+    json_write_field_double(b, "finger_space_x", p->finger_space_x);
+    json_write_field_int64_array(b, "ext_db_keys", p->ext_db_keys, 10);
+    json_write_field_str(b, "status", p->status);
+    json_write_field_int_array(b, "date_slots", p->date_slots, 8);
+    json_write_field_str(b, "created_by", p->created_by);
+    json_write_field_str(b, "modified_by", p->modified_by);
+    json_write_field_double(b, "transparency", p->transparency);
+    json_write_field_double(b, "peak_safety", p->peak_safety);
+    json_write_field_double(b, "backroom_stock", p->backroom_stock);
+    json_write_field_str(b, "delivery_schedule", p->delivery_schedule);
+    json_write_field_str(b, "part_id", p->part_id);
+    json_write_field_int(b, "authority_level", p->authority_level);
+    json_write_field_int(b, "bitmap_unit_override", p->bitmap_unit_override);
+    json_write_field_int(b, "model_lookup_mode", p->model_lookup_mode);
+    json_write_field_int(b, "default_merch_style", p->default_merch_style);
+    json_write_field_int(b, "auto_model", p->auto_model);
+    json_write_field_str(b, "custom_payload", p->custom_payload);
+    json_write_field_str(b, "db_guid", p->db_guid);
+    json_write_field_int(b, "source_code", p->source_code);
+    json_write_field_int64(b, "technical_key", p->technical_key);
+    json_write_object_end(b);
+    return b->err;
+}
+
+static int serialize_position(json_buf_t *b, const psa_position_t *p)
+{
+    json_write_object_start(b);
+    json_write_field_str(b, "type", "Position");
+    json_write_field_int(b, "planogram_key", p->planogram_key);
+    json_write_field_str(b, "upc", p->upc);
+    json_write_field_str(b, "business_id", p->business_id);
+    json_write_field_str(b, "key_text", p->key_text);
+    json_write_field_double(b, "x", p->x);
+    json_write_field_double(b, "width", p->width);
+    json_write_field_double(b, "y", p->y);
+    json_write_field_double(b, "height", p->height);
+    json_write_field_double(b, "z", p->z);
+    json_write_field_double(b, "depth", p->depth);
+    json_write_field_double(b, "slope", p->slope);
+    json_write_field_double(b, "angle", p->angle);
+    json_write_field_double(b, "roll", p->roll);
+    json_write_field_int(b, "merch_style", p->merch_style);
+    json_write_field_int(b, "h_facing", p->h_facing);
+    json_write_field_int(b, "v_facing", p->v_facing);
+    json_write_field_int(b, "d_facing", p->d_facing);
+    json_write_field_int_array(b, "x_cap", p->x_cap, 4);
+    json_write_field_int_array(b, "y_cap", p->y_cap, 4);
+    json_write_field_int_array(b, "z_cap", p->z_cap, 4);
+    json_write_field_int(b, "orientation", p->orientation);
+    json_write_field_double(b, "jumble_x", p->jumble_x);
+    json_write_field_double(b, "jumble_y", p->jumble_y);
+    json_write_field_double(b, "jumble_z", p->jumble_z);
+    json_write_field_double(b, "merch_dim_x", p->merch_dim_x);
+    json_write_field_double(b, "merch_dim_y", p->merch_dim_y);
+    json_write_field_double(b, "merch_dim_z", p->merch_dim_z);
+    json_write_field_double(b, "full_dim_x", p->full_dim_x);
+    json_write_field_double(b, "full_dim_y", p->full_dim_y);
+    json_write_field_double(b, "full_dim_z", p->full_dim_z);
+    json_write_field_int(b, "subunit_x", p->subunit_x);
+    json_write_field_int(b, "subunit_y", p->subunit_y);
+    json_write_field_int(b, "subunit_z", p->subunit_z);
+    json_write_field_str(b, "peg_profile", p->peg_profile);
+    json_write_field_int(b, "manual_units", p->manual_units);
+    json_write_field_int(b, "rank_x", p->rank_x);
+    json_write_field_int(b, "rank_y", p->rank_y);
+    json_write_field_int(b, "rank_z", p->rank_z);
+    json_write_field_int(b, "peg_span", p->peg_span);
+    json_write_field_int(b, "always_float", p->always_float);
+    json_write_field_str(b, "primary_label", p->primary_label);
+    json_write_field_str(b, "secondary_label", p->secondary_label);
+    json_write_field_int_array(b, "merch_xyz", p->merch_xyz, 27);
+    json_write_field_str_array(b, "text_ext", p->text_ext, PSA_POSITION_TEXT_SLOTS);
+    json_write_field_double_array(b, "num_ext", p->num_ext, PSA_POSITION_NUM_SLOTS);
+    json_write_field_int_array(b, "flag_ext", p->flag_ext, PSA_POSITION_FLAG_SLOTS);
+    json_write_field_int(b, "target_space_x", p->target_space_x);
+    json_write_field_int(b, "target_space_y", p->target_space_y);
+    json_write_field_int(b, "target_space_z", p->target_space_z);
+    json_write_field_double(b, "target_val_x", p->target_val_x);
+    json_write_field_double(b, "target_val_y", p->target_val_y);
+    json_write_field_double(b, "target_val_z", p->target_val_z);
+    json_write_field_int(b, "location_id", p->location_id);
+    json_write_field_int(b, "changed", p->changed);
+    json_write_field_int(b, "replenishment_min", p->replenishment_min);
+    json_write_field_int(b, "replenishment_max", p->replenishment_max);
+    json_write_field_str(b, "shape_ref", p->shape_ref);
+    json_write_field_str(b, "bitmap_ref", p->bitmap_ref);
+    json_write_field_int(b, "hide_when_printing", p->hide_when_printing);
+    json_write_field_str(b, "part_id", p->part_id);
+    json_write_field_int(b, "bitmap_unit_override", p->bitmap_unit_override);
+    json_write_field_int(b, "auto_model", p->auto_model);
+    json_write_field_str(b, "custom_payload", p->custom_payload);
+    json_write_field_int(b, "x_cap_includes_units", p->x_cap_includes_units);
+    json_write_field_int(b, "y_cap_includes_units", p->y_cap_includes_units);
+    json_write_object_end(b);
+    return b->err;
+}
+
+static int serialize_performance(json_buf_t *b, const psa_performance_t *p)
+{
+    json_write_object_start(b);
+    json_write_field_str(b, "type", "Performance");
+    json_write_field_str(b, "upc", p->upc);
+    json_write_field_str(b, "business_id", p->business_id);
+    json_write_field_str(b, "key_text", p->key_text);
+    json_write_field_double(b, "price", p->price);
+    json_write_field_double(b, "case_cost", p->case_cost);
+    json_write_field_int(b, "tax_code", p->tax_code);
+    json_write_field_double(b, "unit_movement", p->unit_movement);
+    json_write_field_double(b, "share", p->share);
+    json_write_field_double(b, "combined_perf", p->combined_perf);
+    json_write_field_str_array(b, "text_ext", p->text_ext, PSA_PERF_TEXT_SLOTS);
+    json_write_field_double_array(b, "num_ext", p->num_ext, PSA_PERF_NUM_SLOTS);
+    json_write_field_int_array(b, "flag_ext", p->flag_ext, PSA_PERF_FLAG_SLOTS);
+    json_write_field_int(b, "changed", p->changed);
+    json_write_field_double(b, "case_multiple", p->case_multiple);
+    json_write_field_double(b, "days_supply", p->days_supply);
+    json_write_field_double(b, "peak_safety", p->peak_safety);
+    json_write_field_double(b, "backroom_stock", p->backroom_stock);
+    json_write_field_int(b, "min_units", p->min_units);
+    json_write_field_int(b, "max_units", p->max_units);
+    json_write_field_str(b, "delivery_schedule", p->delivery_schedule);
+    json_write_field_int(b, "replenishment_min", p->replenishment_min);
+    json_write_field_int(b, "replenishment_max", p->replenishment_max);
+    json_write_field_int(b, "assortment_rank", p->assortment_rank);
+    json_write_field_int(b, "recommended_facings", p->recommended_facings);
+    json_write_field_str(b, "assortment_strategy", p->assortment_strategy);
+    json_write_field_str(b, "assortment_tactic", p->assortment_tactic);
+    json_write_field_str(b, "assortment_reason", p->assortment_reason);
+    json_write_field_str(b, "assortment_action", p->assortment_action);
+    json_write_field_str(b, "part_id", p->part_id);
+    json_write_field_str(b, "cluster_name", p->cluster_name);
+    json_write_field_int(b, "target_store_count", p->target_store_count);
+    json_write_field_double(b, "target_dist_percent", p->target_dist_percent);
+    json_write_field_str(b, "assortment_note", p->assortment_note);
+    json_write_field_str(b, "custom_payload", p->custom_payload);
+    json_write_field_int(b, "recommended_orientation", p->recommended_orientation);
+    json_write_field_int(b, "recommended_merch_style", p->recommended_merch_style);
+    json_write_field_int(b, "ignore_recommendations", p->ignore_recommendations);
+    json_write_field_int(b, "priority_code", p->priority_code);
+    json_write_field_str(b, "priority_desc", p->priority_desc);
+    json_write_field_int(b, "force_list", p->force_list);
+    json_write_field_str(b, "planogram_reason", p->planogram_reason);
+    json_write_field_double(b, "max_stage_reduction", p->max_stage_reduction);
+    json_write_object_end(b);
+    return b->err;
+}
+
+static int serialize_segment(json_buf_t *b, const psa_segment_t *p)
+{
+    json_write_object_start(b);
+    json_write_field_str(b, "type", "Segment");
+    json_write_field_int(b, "planogram_key", p->planogram_key);
+    json_write_field_str(b, "name", p->name);
+    json_write_field_str(b, "key_text", p->key_text);
+    json_write_field_double(b, "x", p->x);
+    json_write_field_double(b, "width", p->width);
+    json_write_field_double(b, "y", p->y);
+    json_write_field_double(b, "height", p->height);
+    json_write_field_double(b, "z", p->z);
+    json_write_field_double(b, "depth", p->depth);
+    json_write_field_double(b, "angle", p->angle);
+    json_write_field_double(b, "x_offset", p->x_offset);
+    json_write_field_double(b, "y_offset", p->y_offset);
+    json_write_field_int(b, "door_flag", p->door_flag);
+    json_write_field_int(b, "door_direction", p->door_direction);
+    json_write_field_str_array(b, "text_ext", p->text_ext, PSA_SEGMENT_TEXT_SLOTS);
+    json_write_field_double_array(b, "num_ext", p->num_ext, PSA_SEGMENT_NUM_SLOTS);
+    json_write_field_int_array(b, "flag_ext", p->flag_ext, PSA_SEGMENT_FLAG_SLOTS);
+    json_write_field_double(b, "frame_width", p->frame_width);
+    json_write_field_double(b, "frame_height", p->frame_height);
+    json_write_field_int(b, "changed", p->changed);
+    json_write_field_int(b, "frame_color", p->frame_color);
+    json_write_field_int(b, "frame_fill_pattern", p->frame_fill_pattern);
+    json_write_field_str(b, "part_id", p->part_id);
+    json_write_field_str(b, "gln_code", p->gln_code);
+    json_write_field_str(b, "custom_payload", p->custom_payload);
+    json_write_object_end(b);
+    return b->err;
+}
+
+static int serialize_drawing(json_buf_t *b, const psa_drawing_t *p)
+{
+    json_write_object_start(b);
+    json_write_field_str(b, "type", "Drawing");
+    json_write_field_int(b, "drawing_type", p->drawing_type);
+    json_write_field_str(b, "name", p->name);
+    json_write_field_str(b, "key_text", p->key_text);
+    json_write_field_double(b, "x", p->x);
+    json_write_field_double(b, "width", p->width);
+    json_write_field_double(b, "y", p->y);
+    json_write_field_double(b, "height", p->height);
+    json_write_field_double(b, "z", p->z);
+    json_write_field_double(b, "depth", p->depth);
+    json_write_field_int(b, "fg_color", p->fg_color);
+    json_write_field_int(b, "bg_fill", p->bg_fill);
+    json_write_field_int(b, "bg_color", p->bg_color);
+    json_write_field_int(b, "created_in_view", p->created_in_view);
+    json_write_field_int(b, "show_in_all_views", p->show_in_all_views);
+    json_write_field_int(b, "word_wrap", p->word_wrap);
+    json_write_field_int(b, "circular", p->circular);
+    json_write_field_double(b, "start_x", p->start_x);
+    json_write_field_double(b, "start_y", p->start_y);
+    json_write_field_double(b, "start_z", p->start_z);
+    json_write_field_double(b, "end_x", p->end_x);
+    json_write_field_double(b, "end_y", p->end_y);
+    json_write_field_double(b, "end_z", p->end_z);
+    json_write_field_str(b, "text", p->text);
+    json_write_field_int(b, "text_scale", p->text_scale);
+    json_write_field_int(b, "outline", p->outline);
+    json_write_field_int(b, "callout", p->callout);
+    json_write_field_int64_array(b, "font_metrics", p->font_metrics, 5);
+    json_write_field_int_array(b, "font_style", p->font_style, 8);
+    json_write_field_str(b, "font_face", p->font_face);
+    json_write_field_double(b, "anchor_x", p->anchor_x);
+    json_write_field_double(b, "anchor_y", p->anchor_y);
+    json_write_field_double(b, "anchor_z", p->anchor_z);
+    json_write_field_int(b, "center_text", p->center_text);
+    json_write_field_int(b, "changed", p->changed);
+    json_write_field_int(b, "hide_when_printing", p->hide_when_printing);
+    json_write_field_str(b, "custom_payload", p->custom_payload);
+    json_write_object_end(b);
+    return b->err;
+}
+
+static int serialize_divider(json_buf_t *b, const psa_divider_t *p)
+{
+    json_write_object_start(b);
+    json_write_field_str(b, "type", "Divider");
+    json_write_field_str(b, "id", p->id);
+    json_write_field_double(b, "x", p->x);
+    json_write_field_double(b, "width", p->width);
+    json_write_field_double(b, "y", p->y);
+    json_write_field_double(b, "height", p->height);
+    json_write_field_double(b, "z", p->z);
+    json_write_field_double(b, "depth", p->depth);
+    json_write_field_int(b, "color", p->color);
+    json_write_field_str(b, "undef_text_1", p->undef_text_1);
+    json_write_field_str(b, "desc_text_1", p->desc_text_1);
+    json_write_field_str(b, "desc_text_2", p->desc_text_2);
+    json_write_field_str(b, "desc_text_3", p->desc_text_3);
+    json_write_field_double(b, "num_1", p->num_1);
+    json_write_field_double(b, "num_2", p->num_2);
+    json_write_field_double(b, "num_3", p->num_3);
+    json_write_field_str(b, "undef_text_2", p->undef_text_2);
+    json_write_field_str(b, "undef_text_3", p->undef_text_3);
+    json_write_object_end(b);
+    return b->err;
+}
+
+/* ======================================================================== */
+/* Finalize and public single-record API                                    */
+/* ======================================================================== */
+
+static int finalize_json(json_buf_t *b, char *out, size_t out_size,
+                          size_t *out_written, size_t *out_needed)
 {
     if (out_needed)
-        *out_needed = j->needed + 1;
+        *out_needed = b->len + 1;
 
     if (out && out_size > 0) {
         size_t idx = 0;
-        if (j->needed < out_size)
-            idx = j->needed;
+        if (b->len < out_size)
+            idx = b->len;
         else
             idx = out_size - 1;
         out[idx] = '\0';
     }
 
-    if (j->err != PSA_OK)
-        return j->err;
+    if (b->err != PSA_OK)
+        return b->err;
 
     if (out_written)
-        *out_written = j->needed;
+        *out_written = b->len;
     return PSA_OK;
 }
 
@@ -364,14 +836,13 @@ int psa_file_meta_to_json(const char *header, const char *version,
     if (out_size > 0 && !out)
         return PSA_ERR_INVALID_ARG;
 
-    jb_t jb = { out, out_size, 0, PSA_OK };
-    japp(&jb, "{\"header\":\"");
-    jesc(&jb, header ? header : "");
-    japp(&jb, "\",\"version\":\"");
-    jesc(&jb, version ? version : "");
-    japp(&jb, "\"}");
+    json_buf_t b = { out, out_size, 0, PSA_OK, 0 };
+    json_write_object_start(&b);
+    json_write_field_str(&b, "header", header ? header : "");
+    json_write_field_str(&b, "version", version ? version : "");
+    json_write_object_end(&b);
 
-    return finalize_json(&jb, out, out_size, out_written, out_needed);
+    return finalize_json(&b, out, out_size, out_written, out_needed);
 }
 
 int psa_record_to_json(const psa_record_t *rec,
@@ -382,38 +853,42 @@ int psa_record_to_json(const psa_record_t *rec,
     if (!rec || (out_size > 0 && !out))
         return PSA_ERR_INVALID_ARG;
 
-    jb_t j = { out, out_size, 0, PSA_OK };
+    json_buf_t b = { out, out_size, 0, PSA_OK, 0 };
     int rc;
+
     switch (rec->type) {
-        case PSA_REC_PROJECT:     rc = j_project(&j, &rec->rec.project); break;
-        case PSA_REC_PLANOGRAM:   rc = j_planogram(&j, &rec->rec.planogram); break;
-        case PSA_REC_FIXTURE:     rc = j_fixture(&j, &rec->rec.fixture); break;
-        case PSA_REC_PRODUCT:     rc = j_product(&j, &rec->rec.product); break;
-        case PSA_REC_POSITION:    rc = j_position(&j, &rec->rec.position); break;
-        case PSA_REC_PERFORMANCE: rc = j_performance(&j, &rec->rec.performance); break;
-        case PSA_REC_SEGMENT:     rc = j_segment(&j, &rec->rec.segment); break;
-        case PSA_REC_DRAWING:     rc = j_drawing(&j, &rec->rec.drawing); break;
-        case PSA_REC_DIVIDER:     rc = j_divider(&j, &rec->rec.divider); break;
+        case PSA_REC_PROJECT:     rc = serialize_project(&b, &rec->rec.project);     break;
+        case PSA_REC_PLANOGRAM:   rc = serialize_planogram(&b, &rec->rec.planogram); break;
+        case PSA_REC_FIXTURE:     rc = serialize_fixture(&b, &rec->rec.fixture);     break;
+        case PSA_REC_PRODUCT:     rc = serialize_product(&b, &rec->rec.product);     break;
+        case PSA_REC_POSITION:    rc = serialize_position(&b, &rec->rec.position);   break;
+        case PSA_REC_PERFORMANCE: rc = serialize_performance(&b, &rec->rec.performance); break;
+        case PSA_REC_SEGMENT:     rc = serialize_segment(&b, &rec->rec.segment);     break;
+        case PSA_REC_DRAWING:     rc = serialize_drawing(&b, &rec->rec.drawing);     break;
+        case PSA_REC_DIVIDER:     rc = serialize_divider(&b, &rec->rec.divider);     break;
         default: return PSA_ERR_INVALID_ARG;
     }
-    if (rc != PSA_OK)
-        return finalize_json(&j, out, out_size, out_written, out_needed);
 
-    return finalize_json(&j, out, out_size, out_written, out_needed);
+    (void)rc; /* b->err already carries the result */
+    return finalize_json(&b, out, out_size, out_written, out_needed);
 }
 
+/* ======================================================================== */
+/* Document accumulation                                                    */
+/* ======================================================================== */
+
 typedef struct {
-    char *buf;
-    size_t len;
-    size_t cap;
-    int count;
+    char   *buf;
+    size_t  len;
+    size_t  cap;
+    int     count;
 } json_bucket_t;
 
 typedef struct {
     json_bucket_t buckets[9];
-    int failed_rc;
-    size_t total_bytes;
-    size_t max_document_bytes;
+    int           failed_rc;
+    size_t        total_bytes;
+    size_t        max_document_bytes;
 } doc_accum_t;
 
 static int bucket_append(doc_accum_t *acc, json_bucket_t *b, const char *s, size_t n)
@@ -474,9 +949,9 @@ static int document_cb(psa_record_t *rec, void *user_data)
         return 1;
     }
 
-    json_bucket_t *b = &acc->buckets[(int)rec->type];
-    if (b->count > 0) {
-        rc = bucket_append(acc, b, ",", 1);
+    json_bucket_t *bucket = &acc->buckets[(int)rec->type];
+    if (bucket->count > 0) {
+        rc = bucket_append(acc, bucket, ",", 1);
         if (rc != PSA_OK) {
             free(tmp);
             acc->failed_rc = rc;
@@ -484,16 +959,60 @@ static int document_cb(psa_record_t *rec, void *user_data)
         }
     }
 
-    rc = bucket_append(acc, b, tmp, written);
+    rc = bucket_append(acc, bucket, tmp, written);
     free(tmp);
     if (rc != PSA_OK) {
         acc->failed_rc = rc;
         return 1;
     }
 
-    b->count++;
+    bucket->count++;
     return 0;
 }
+
+/* ======================================================================== */
+/* Shared document emission                                                 */
+/* ======================================================================== */
+
+static const char *record_array_names[9] = {
+    "projects", "planograms", "fixtures", "products",
+    "positions", "performances", "segments", "drawings", "dividers"
+};
+
+static int build_json_document(json_buf_t *b, doc_accum_t *acc,
+                                const char *header, const char *version)
+{
+    json_write_object_start(b);
+    json_write_field_str(b, "header", header ? header : "");
+    json_write_field_str(b, "version", version ? version : "");
+
+    for (int i = 0; i < 9; i++) {
+        json_write_key(b, record_array_names[i]);
+        json_buf_append_char(b, '[');
+        if (acc->buckets[i].len > 0)
+            json_buf_append_bytes(b, acc->buckets[i].buf, acc->buckets[i].len);
+        json_buf_append_char(b, ']');
+    }
+
+    json_write_object_end(b);
+    return b->err;
+}
+
+static void free_buckets_and_headers(doc_accum_t *acc,
+                                       const char **header,
+                                       const char **version)
+{
+    free((void *)*header);
+    free((void *)*version);
+    *header = NULL;
+    *version = NULL;
+    for (int i = 0; i < 9; i++)
+        free(acc->buckets[i].buf);
+}
+
+/* ======================================================================== */
+/* Public document API                                                      */
+/* ======================================================================== */
 
 int psa_parse_file_to_json_document(const char *path,
                                     char *out, size_t out_size,
@@ -513,55 +1032,31 @@ int psa_parse_file_to_json_document(const char *path,
     const char *header = NULL;
     const char *version = NULL;
     int rc;
-    jb_t jb = { out, out_size, 0, PSA_OK };
-    jb_t *j = &jb;
-    const char *array_names[9] = {
-        "projects", "planograms", "fixtures", "products",
-        "positions", "performances", "segments", "drawings", "dividers"
-    };
+    json_buf_t b = { out, out_size, 0, PSA_OK, 0 };
 
     acc.max_document_bytes = PSA_DEFAULT_MAX_DOCUMENT_BYTES;
 
     psa_parse_limits_t limits = {0};
     limits.max_document_bytes = PSA_DEFAULT_MAX_DOCUMENT_BYTES;
 
-    rc = psa_parse_file_ex(path, &limits, &header, &version, document_cb, &acc, errbuf, errbuf_size);
+    rc = psa_parse_file_ex(path, &limits, &header, &version,
+                           document_cb, &acc, errbuf, errbuf_size);
     if (rc != PSA_OK) {
         if (rc == PSA_ERR_ABORT && acc.failed_rc != 0)
             rc = acc.failed_rc;
-        if (rc == PSA_ERR_ABORT && acc.failed_rc == 0 && errbuf && errbuf_size > 0 && errbuf[0] == '\0')
+        if (rc == PSA_ERR_ABORT && acc.failed_rc == 0 &&
+            errbuf && errbuf_size > 0 && errbuf[0] == '\0')
             snprintf(errbuf, errbuf_size, "Failed to build JSON document");
         set_err_for_rc_if_empty(rc, errbuf, errbuf_size);
-        free((void *)header);
-        free((void *)version);
-        for (int i = 0; i < 9; i++)
-            free(acc.buckets[i].buf);
+        free_buckets_and_headers(&acc, &header, &version);
         return rc;
     }
 
-    japp(j, "{\"header\":\"");
-    jesc(j, header ? header : "");
-    japp(j, "\",\"version\":\"");
-    jesc(j, version ? version : "");
-    japp(j, "\"");
+    build_json_document(&b, &acc, header, version);
 
-    for (int i = 0; i < 9; i++) {
-        japp(j, ",\"");
-        japp(j, array_names[i]);
-        japp(j, "\":[");
-        if (acc.buckets[i].len > 0)
-            japp(j, acc.buckets[i].buf);
-        japp(j, "]");
-    }
+    free_buckets_and_headers(&acc, &header, &version);
 
-    japp(j, "}");
-
-    free((void *)header);
-    free((void *)version);
-    for (int i = 0; i < 9; i++)
-        free(acc.buckets[i].buf);
-
-    rc = finalize_json(&jb, out, out_size, out_written, out_needed);
+    rc = finalize_json(&b, out, out_size, out_written, out_needed);
     if (rc != PSA_OK)
         set_err_for_rc_if_empty(rc, errbuf, errbuf_size);
     return rc;
@@ -573,7 +1068,8 @@ int psa_parse_buffer_to_json_document(const char *data, size_t data_len,
                                       size_t *out_needed,
                                       char *errbuf, size_t errbuf_size)
 {
-    if (((!data) && data_len > 0) || (out_size > 0 && !out) || (errbuf_size > 0 && !errbuf)) {
+    if (((!data) && data_len > 0) || (out_size > 0 && !out) ||
+        (errbuf_size > 0 && !errbuf)) {
         set_err(errbuf, errbuf_size, "Invalid arguments");
         return PSA_ERR_INVALID_ARG;
     }
@@ -585,12 +1081,7 @@ int psa_parse_buffer_to_json_document(const char *data, size_t data_len,
     const char *header = NULL;
     const char *version = NULL;
     int rc;
-    jb_t jb = { out, out_size, 0, PSA_OK };
-    jb_t *j = &jb;
-    const char *array_names[9] = {
-        "projects", "planograms", "fixtures", "products",
-        "positions", "performances", "segments", "drawings", "dividers"
-    };
+    json_buf_t b = { out, out_size, 0, PSA_OK, 0 };
 
     acc.max_document_bytes = PSA_DEFAULT_MAX_DOCUMENT_BYTES;
 
@@ -604,39 +1095,19 @@ int psa_parse_buffer_to_json_document(const char *data, size_t data_len,
     if (rc != PSA_OK) {
         if (rc == PSA_ERR_ABORT && acc.failed_rc != 0)
             rc = acc.failed_rc;
-        if (rc == PSA_ERR_ABORT && acc.failed_rc == 0 && errbuf && errbuf_size > 0 && errbuf[0] == '\0')
+        if (rc == PSA_ERR_ABORT && acc.failed_rc == 0 &&
+            errbuf && errbuf_size > 0 && errbuf[0] == '\0')
             snprintf(errbuf, errbuf_size, "Failed to build JSON document");
         set_err_for_rc_if_empty(rc, errbuf, errbuf_size);
-        free((void *)header);
-        free((void *)version);
-        for (int i = 0; i < 9; i++)
-            free(acc.buckets[i].buf);
+        free_buckets_and_headers(&acc, &header, &version);
         return rc;
     }
 
-    japp(j, "{\"header\":\"");
-    jesc(j, header ? header : "");
-    japp(j, "\",\"version\":\"");
-    jesc(j, version ? version : "");
-    japp(j, "\"");
+    build_json_document(&b, &acc, header, version);
 
-    for (int i = 0; i < 9; i++) {
-        japp(j, ",\"");
-        japp(j, array_names[i]);
-        japp(j, "\":[");
-        if (acc.buckets[i].len > 0)
-            japp(j, acc.buckets[i].buf);
-        japp(j, "]");
-    }
+    free_buckets_and_headers(&acc, &header, &version);
 
-    japp(j, "}");
-
-    free((void *)header);
-    free((void *)version);
-    for (int i = 0; i < 9; i++)
-        free(acc.buckets[i].buf);
-
-    rc = finalize_json(&jb, out, out_size, out_written, out_needed);
+    rc = finalize_json(&b, out, out_size, out_written, out_needed);
     if (rc != PSA_OK)
         set_err_for_rc_if_empty(rc, errbuf, errbuf_size);
     return rc;
