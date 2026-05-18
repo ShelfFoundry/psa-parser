@@ -6,3 +6,6 @@ respective owners.
 
 The project does not include proprietary documentation, vendor software, or
 customer planogram files.
+
+The implementation is based on independent analysis and operational
+experience with PSA files.
