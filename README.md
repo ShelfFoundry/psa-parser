@@ -6,6 +6,3 @@ respective owners.
 
 The project does not include proprietary documentation, vendor software, or
 customer planogram files.
-
-I implemented this from personal operational knowledge and from files I was
-authorized to inspect.
