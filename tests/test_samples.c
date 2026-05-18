@@ -387,6 +387,82 @@ static int file_contains(const char *path, const char *needle)
     return 0;
 }
 
+static int file_line_count(const char *path)
+{
+    int lines = 0;
+    int ch;
+    FILE *fp = fopen(path, "rb");
+    if (!fp)
+        return -1;
+
+    while ((ch = fgetc(fp)) != EOF) {
+        if (ch == '\n')
+            lines++;
+    }
+
+    fclose(fp);
+    return lines;
+}
+
+static int test_cli_default_document_and_stream_mode(void)
+{
+    char path[] = "/tmp/psa_synth_cli_modes_XXXXXX";
+    char out_doc[] = "/tmp/psa_cli_doc_XXXXXX";
+    char out_stream[] = "/tmp/psa_cli_stream_XXXXXX";
+    char err_tmp[] = "/tmp/psa_cli_modes_err_XXXXXX";
+    char cmd[4096];
+    int fd;
+    int out_doc_fd;
+    int out_stream_fd;
+    int err_fd;
+    int rc;
+    char *project = build_record_line("Project", 213, NULL, 0);
+    char *planogram = build_record_line("Planogram", 229, NULL, 0);
+    char *product = build_record_line("Product", 274, NULL, 0);
+    const char *lines[3];
+
+    fd = mkstemp(path);
+    FAIL_IF(fd < 0, "mkstemp failed");
+    close(fd);
+
+    out_doc_fd = mkstemp(out_doc);
+    out_stream_fd = mkstemp(out_stream);
+    err_fd = mkstemp(err_tmp);
+    FAIL_IF(out_doc_fd < 0 || out_stream_fd < 0 || err_fd < 0, "mkstemp failed");
+    close(out_doc_fd);
+    close(out_stream_fd);
+    close(err_fd);
+
+    FAIL_IF(!project || !planogram || !product, "line allocation failed");
+    lines[0] = project;
+    lines[1] = planogram;
+    lines[2] = product;
+    FAIL_IF(write_psa_file(path, lines, 3) != 0, "failed to write synthetic file");
+
+    snprintf(cmd, sizeof(cmd), "./build/psa-cli '%s' > '%s' 2> '%s'", path, out_doc, err_tmp);
+    rc = system(cmd);
+    FAIL_IF(rc != 0, "default cli mode failed");
+    FAIL_IF(file_line_count(out_doc) != 1, "default mode should emit one document line");
+    FAIL_IF(!file_contains(out_doc, "\"projects\":[{"), "default mode missing projects array");
+
+    snprintf(cmd, sizeof(cmd), "./build/psa-cli --stream '%s' > '%s' 2> '%s'", path, out_stream, err_tmp);
+    rc = system(cmd);
+    FAIL_IF(rc != 0, "stream cli mode failed");
+    FAIL_IF(file_line_count(out_stream) != 4, "stream mode should emit metadata + 3 record lines");
+    FAIL_IF(!file_contains(out_stream, "\"type\":\"Project\""), "stream mode missing Project record");
+    FAIL_IF(!file_contains(out_stream, "\"type\":\"Planogram\""), "stream mode missing Planogram record");
+    FAIL_IF(!file_contains(out_stream, "\"type\":\"Product\""), "stream mode missing Product record");
+
+    unlink(path);
+    unlink(out_doc);
+    unlink(out_stream);
+    unlink(err_tmp);
+    free(project);
+    free(planogram);
+    free(product);
+    return 0;
+}
+
 static int test_cli_summary_with_synthetic_input(void)
 {
     char path[] = "/tmp/psa_synth_cli_XXXXXX";
@@ -491,6 +567,7 @@ int main(void)
     rc |= test_invalid_non_product_fails();
     rc |= test_callback_abort();
     rc |= test_spec_defaults();
+    rc |= test_cli_default_document_and_stream_mode();
     rc |= test_cli_summary_with_synthetic_input();
     rc |= test_document_json_api();
 

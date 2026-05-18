@@ -52,19 +52,25 @@ Build first:
 make all
 ```
 
-Parse a PSA file and emit JSON Lines (one JSON object per record):
+Parse a PSA file and emit one top-level JSON document (default):
 
 ```bash
 ./build/psa-cli path/to/file.psa
 ```
 
-Show parse summary instead of record JSON:
+Emit JSON Lines stream instead (one JSON object per line):
+
+```bash
+./build/psa-cli --stream path/to/file.psa
+```
+
+Show parse summary instead of JSON output:
 
 ```bash
 ./build/psa-cli --summary path/to/file.psa
 ```
 
-Emit one top-level JSON document with metadata and record arrays:
+Emit one top-level JSON document explicitly (same as default):
 
 ```bash
 ./build/psa-cli --document path/to/file.psa
