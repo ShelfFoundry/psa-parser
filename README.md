@@ -86,10 +86,12 @@ Help:
 
 - Main entry point: `psa_parse_file(...)`
 - Limits-aware parser: `psa_parse_file_ex(...)`
+- In-memory parsing: `psa_parse_buffer(...)`, `psa_parse_buffer_ex(...)`
 - Callback receives typed records via `psa_record_t`
 - JSON helpers:
   - `psa_record_to_json(...)` (returns `PSA_OK`/`PSA_ERR_*`, reports `out_written`/`out_needed`)
   - `psa_file_meta_to_json(...)` (returns `PSA_OK`/`PSA_ERR_*`, reports `out_written`/`out_needed`)
   - `psa_parse_file_to_json_document(...)` (returns `PSA_OK`/`PSA_ERR_*`, reports `out_written`/`out_needed`)
+  - `psa_parse_buffer_to_json_document(...)` (same contract for in-memory PSA content)
 
 See `include/psa.h` for full API details and record structures.

@@ -676,6 +676,23 @@ int psa_parse_file_ex(const char *path,
                       void *user_data,
                       char *errbuf, size_t errbuf_size);
 
+/* Parse PSA content directly from an in-memory buffer.                     */
+int psa_parse_buffer(const char *data, size_t data_len,
+                     const char **out_header,
+                     const char **out_version,
+                     psa_record_callback cb,
+                     void *user_data,
+                     char *errbuf, size_t errbuf_size);
+
+/* Parse PSA content from an in-memory buffer with explicit safety limits.  */
+int psa_parse_buffer_ex(const char *data, size_t data_len,
+                        const psa_parse_limits_t *limits,
+                        const char **out_header,
+                        const char **out_version,
+                        psa_record_callback cb,
+                        void *user_data,
+                        char *errbuf, size_t errbuf_size);
+
 /* ======================================================================== */
 /* JSON helpers (used by CLI, but also available to library consumers)     */
 /* ======================================================================== */
@@ -707,6 +724,13 @@ int psa_parse_file_to_json_document(const char *path,
                                     size_t *out_written,
                                     size_t *out_needed,
                                     char *errbuf, size_t errbuf_size);
+
+/* Serialize PSA content from an in-memory buffer into a JSON document.     */
+int psa_parse_buffer_to_json_document(const char *data, size_t data_len,
+                                      char *out, size_t out_size,
+                                      size_t *out_written,
+                                      size_t *out_needed,
+                                      char *errbuf, size_t errbuf_size);
 
 #ifdef __cplusplus
 }

@@ -17,7 +17,10 @@ Primary entry points:
 
 - `psa_parse_file(...)`: streaming callback API
 - `psa_parse_file_ex(...)`: streaming callback API with explicit safety limits
+- `psa_parse_buffer(...)`: streaming callback API for in-memory PSA bytes
+- `psa_parse_buffer_ex(...)`: in-memory API with explicit safety limits
 - `psa_parse_file_to_json_document(...)`: single JSON document API
+- `psa_parse_buffer_to_json_document(...)`: single JSON document API from in-memory PSA bytes
 
 Supporting helpers:
 
@@ -32,6 +35,8 @@ When the output buffer is too small they return `PSA_ERR_NOSPACE` and set
 
 - Use `psa_parse_file(...)` when you want to process records incrementally and keep memory usage low.
 - Use `psa_parse_file_to_json_document(...)` when you want one top-level object with arrays for each record type.
+- Use `psa_parse_buffer(...)` / `psa_parse_buffer_ex(...)` when your host runtime already has the PSA content in memory.
+- Use `psa_parse_buffer_to_json_document(...)` when you want one-shot JSON output from an in-memory PSA payload.
 
 ## Option 2: CLI Integration
 

@@ -96,6 +96,34 @@ static int write_psa_file(const char *path, const char *const *lines, size_t nli
     return 0;
 }
 
+static char *build_psa_buffer(const char *const *lines, size_t nlines, size_t *out_len)
+{
+    size_t len = strlen("SYNTHETIC HEADER\n") + strlen("SYNTHETIC VERSION\n");
+    for (size_t i = 0; i < nlines; i++)
+        len += strlen(lines[i]);
+
+    char *buf = malloc(len + 1);
+    if (!buf)
+        return NULL;
+
+    size_t pos = 0;
+    memcpy(buf + pos, "SYNTHETIC HEADER\n", strlen("SYNTHETIC HEADER\n"));
+    pos += strlen("SYNTHETIC HEADER\n");
+    memcpy(buf + pos, "SYNTHETIC VERSION\n", strlen("SYNTHETIC VERSION\n"));
+    pos += strlen("SYNTHETIC VERSION\n");
+
+    for (size_t i = 0; i < nlines; i++) {
+        size_t n = strlen(lines[i]);
+        memcpy(buf + pos, lines[i], n);
+        pos += n;
+    }
+
+    buf[pos] = '\0';
+    if (out_len)
+        *out_len = pos;
+    return buf;
+}
+
 typedef struct {
     int counts[9];
     int fixture_planogram_key;
@@ -564,6 +592,71 @@ static int test_document_json_api(void)
     return 0;
 }
 
+static int test_buffer_parse_and_document_api(void)
+{
+    char errbuf[1024] = {0};
+    const char *header = NULL;
+    const char *version = NULL;
+    count_state_t st = {0};
+    field_override_t plan_ov[] = { {2, "91"} };
+    char *project = build_record_line("Project", 213, NULL, 0);
+    char *planogram = build_record_line("Planogram", 229, plan_ov, 1);
+    char *fixture = build_record_line("Fixture", 158, NULL, 0);
+    const char *lines[3];
+    size_t buf_len = 0;
+    char *psa_buf;
+    char *doc;
+    size_t written = 0;
+    size_t needed = 0;
+    int rc;
+
+    FAIL_IF(!project || !planogram || !fixture, "line allocation failed");
+    lines[0] = project;
+    lines[1] = planogram;
+    lines[2] = fixture;
+    psa_buf = build_psa_buffer(lines, 3, &buf_len);
+    FAIL_IF(!psa_buf, "failed to build psa buffer");
+
+    rc = psa_parse_buffer(psa_buf, buf_len, &header, &version, count_cb, &st, errbuf, sizeof(errbuf));
+    FAIL_IF(rc != PSA_OK, "psa_parse_buffer failed: %s", errbuf);
+    FAIL_IF(!header || strcmp(header, "SYNTHETIC HEADER") != 0, "bad header from buffer parse");
+    FAIL_IF(!version || strcmp(version, "SYNTHETIC VERSION") != 0, "bad version from buffer parse");
+    FAIL_IF(st.counts[PSA_REC_PROJECT] != 1, "expected one project from buffer parse");
+    FAIL_IF(st.counts[PSA_REC_PLANOGRAM] != 1, "expected one planogram from buffer parse");
+    FAIL_IF(st.counts[PSA_REC_FIXTURE] != 1, "expected one fixture from buffer parse");
+    FAIL_IF(st.fixture_planogram_key != 91, "expected propagated planogram key 91, got %d", st.fixture_planogram_key);
+
+    size_t doc_cap = 1024;
+    doc = malloc(doc_cap);
+    FAIL_IF(!doc, "malloc failed");
+    for (;;) {
+        rc = psa_parse_buffer_to_json_document(psa_buf, buf_len,
+                                               doc, doc_cap,
+                                               &written, &needed,
+                                               errbuf, sizeof(errbuf));
+        if (rc == PSA_OK)
+            break;
+        FAIL_IF(rc != PSA_ERR_NOSPACE, "psa_parse_buffer_to_json_document failed: rc=%d err=%s", rc, errbuf);
+        FAIL_IF(needed <= doc_cap, "expected needed > cap on nospace (%zu <= %zu)", needed, doc_cap);
+        doc_cap = needed;
+        char *next = realloc(doc, doc_cap);
+        FAIL_IF(!next, "realloc failed");
+        doc = next;
+    }
+    FAIL_IF(written == 0, "buffer document api wrote empty output");
+    FAIL_IF(strstr(doc, "\"projects\":[{") == NULL, "buffer doc missing projects array");
+    FAIL_IF(strstr(doc, "\"fixtures\":[{") == NULL, "buffer doc missing fixtures array");
+
+    free((void *)header);
+    free((void *)version);
+    free(project);
+    free(planogram);
+    free(fixture);
+    free(psa_buf);
+    free(doc);
+    return 0;
+}
+
 static int test_invalid_arguments(void)
 {
     char errbuf[128] = {0};
@@ -585,9 +678,19 @@ static int test_invalid_arguments(void)
     FAIL_IF(rc != PSA_ERR_INVALID_ARG, "expected PSA_ERR_INVALID_ARG for NULL out, got %d", rc);
 
     errbuf[0] = '\0';
+    rc = psa_parse_buffer(NULL, 1, NULL, NULL, count_cb, NULL, errbuf, sizeof(errbuf));
+    FAIL_IF(rc != PSA_ERR_INVALID_ARG, "expected PSA_ERR_INVALID_ARG for NULL buffer with non-zero len, got %d", rc);
+    FAIL_IF(errbuf[0] == '\0', "expected errbuf for buffer invalid args");
+
+    errbuf[0] = '\0';
     rc = psa_parse_file_to_json_document(NULL, NULL, 0, NULL, NULL, errbuf, sizeof(errbuf));
     FAIL_IF(rc != PSA_ERR_INVALID_ARG, "expected PSA_ERR_INVALID_ARG for NULL path in doc API, got %d", rc);
     FAIL_IF(errbuf[0] == '\0', "expected errbuf for doc API invalid args");
+
+    errbuf[0] = '\0';
+    rc = psa_parse_buffer_to_json_document(NULL, 2, NULL, 0, NULL, NULL, errbuf, sizeof(errbuf));
+    FAIL_IF(rc != PSA_ERR_INVALID_ARG, "expected PSA_ERR_INVALID_ARG for NULL buffer in doc API, got %d", rc);
+    FAIL_IF(errbuf[0] == '\0', "expected errbuf for buffer doc API invalid args");
 
     return 0;
 }
@@ -603,6 +706,7 @@ int main(void)
     rc |= test_cli_default_document_and_stream_mode();
     rc |= test_cli_summary_with_synthetic_input();
     rc |= test_document_json_api();
+    rc |= test_buffer_parse_and_document_api();
     rc |= test_invalid_arguments();
 
     if (rc == 0)

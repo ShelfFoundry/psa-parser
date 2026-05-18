@@ -566,3 +566,78 @@ int psa_parse_file_to_json_document(const char *path,
         set_err_for_rc_if_empty(rc, errbuf, errbuf_size);
     return rc;
 }
+
+int psa_parse_buffer_to_json_document(const char *data, size_t data_len,
+                                      char *out, size_t out_size,
+                                      size_t *out_written,
+                                      size_t *out_needed,
+                                      char *errbuf, size_t errbuf_size)
+{
+    if (((!data) && data_len > 0) || (out_size > 0 && !out) || (errbuf_size > 0 && !errbuf)) {
+        set_err(errbuf, errbuf_size, "Invalid arguments");
+        return PSA_ERR_INVALID_ARG;
+    }
+
+    if (errbuf && errbuf_size > 0)
+        errbuf[0] = '\0';
+
+    doc_accum_t acc = {0};
+    const char *header = NULL;
+    const char *version = NULL;
+    int rc;
+    jb_t jb = { out, out_size, 0, PSA_OK };
+    jb_t *j = &jb;
+    const char *array_names[9] = {
+        "projects", "planograms", "fixtures", "products",
+        "positions", "performances", "segments", "drawings", "dividers"
+    };
+
+    acc.max_document_bytes = PSA_DEFAULT_MAX_DOCUMENT_BYTES;
+
+    psa_parse_limits_t limits = {0};
+    limits.max_document_bytes = PSA_DEFAULT_MAX_DOCUMENT_BYTES;
+
+    rc = psa_parse_buffer_ex(data, data_len, &limits,
+                             &header, &version,
+                             document_cb, &acc,
+                             errbuf, errbuf_size);
+    if (rc != PSA_OK) {
+        if (rc == PSA_ERR_ABORT && acc.failed_rc != 0)
+            rc = acc.failed_rc;
+        if (rc == PSA_ERR_ABORT && acc.failed_rc == 0 && errbuf && errbuf_size > 0 && errbuf[0] == '\0')
+            snprintf(errbuf, errbuf_size, "Failed to build JSON document");
+        set_err_for_rc_if_empty(rc, errbuf, errbuf_size);
+        free((void *)header);
+        free((void *)version);
+        for (int i = 0; i < 9; i++)
+            free(acc.buckets[i].buf);
+        return rc;
+    }
+
+    japp(j, "{\"header\":\"");
+    jesc(j, header ? header : "");
+    japp(j, "\",\"version\":\"");
+    jesc(j, version ? version : "");
+    japp(j, "\"");
+
+    for (int i = 0; i < 9; i++) {
+        japp(j, ",\"");
+        japp(j, array_names[i]);
+        japp(j, "\":[");
+        if (acc.buckets[i].len > 0)
+            japp(j, acc.buckets[i].buf);
+        japp(j, "]");
+    }
+
+    japp(j, "}");
+
+    free((void *)header);
+    free((void *)version);
+    for (int i = 0; i < 9; i++)
+        free(acc.buckets[i].buf);
+
+    rc = finalize_json(&jb, out, out_size, out_written, out_needed);
+    if (rc != PSA_OK)
+        set_err_for_rc_if_empty(rc, errbuf, errbuf_size);
+    return rc;
+}
