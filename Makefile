@@ -10,6 +10,7 @@ CLI_SRC = cli/main.c
 CLI_OBJ = $(CLI_SRC:cli/%.c=build/cli_%.o)
 
 TEST_BINS = build/tests/test_numeric build/tests/test_preprocess build/tests/test_json build/tests/test_samples
+SYNTHETIC_STAMP = synthetic/out/.generated.stamp
 
 .PHONY: all clean test synthetic-generate synthetic-verify synthetic-test
 
@@ -33,11 +34,15 @@ build/libpsa.a: $(LIB_OBJ)
 build/psa-cli: $(CLI_OBJ) build/libpsa.a
 	$(CC) $(LDFLAGS) $^ -o $@ -lm
 
-test: build/psa-cli $(TEST_BINS)
+test: $(SYNTHETIC_STAMP) build/psa-cli $(TEST_BINS)
 	@for t in $(TEST_BINS); do \
 		echo "Running $$t..."; \
 		"$$t" || exit 1; \
 	done
+
+$(SYNTHETIC_STAMP): synthetic/generate_synthetic_psa.py
+	$(PYTHON) synthetic/generate_synthetic_psa.py
+	touch $@
 
 synthetic-generate:
 	$(PYTHON) synthetic/generate_synthetic_psa.py

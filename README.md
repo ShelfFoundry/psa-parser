@@ -19,6 +19,7 @@ The parser may be used by downstream tools to convert PSA input into other data 
 - Linux/macOS shell environment
 - `gcc`
 - `make`
+- `python3` (for synthetic fixture generation used by tests)
 
 No external runtime dependencies are required for the parser library or CLI.
 
