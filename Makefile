@@ -1,6 +1,7 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -Werror -std=c11 -O2 -Iinclude
 LDFLAGS =
+PYTHON ?= python3
 
 LIB_SRC = src/numeric.c src/preprocess.c src/records.c src/json.c src/parser.c
 LIB_OBJ = $(LIB_SRC:src/%.c=build/%.o)
@@ -10,7 +11,7 @@ CLI_OBJ = $(CLI_SRC:cli/%.c=build/cli_%.o)
 
 TEST_BINS = build/tests/test_numeric build/tests/test_preprocess build/tests/test_json build/tests/test_samples
 
-.PHONY: all clean test
+.PHONY: all clean test synthetic-generate synthetic-verify synthetic-test
 
 all: build/libpsa.a build/psa-cli $(TEST_BINS)
 
@@ -37,6 +38,14 @@ test: build/psa-cli $(TEST_BINS)
 		echo "Running $$t..."; \
 		"$$t" || exit 1; \
 	done
+
+synthetic-generate:
+	$(PYTHON) synthetic/generate_synthetic_psa.py
+
+synthetic-verify: build/psa-cli
+	$(PYTHON) synthetic/verify_synthetic.py
+
+synthetic-test: synthetic-generate synthetic-verify
 
 build:
 	mkdir -p build

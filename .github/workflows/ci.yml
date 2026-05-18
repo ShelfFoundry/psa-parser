@@ -21,3 +21,16 @@ jobs:
 
       - name: Test
         run: make test
+
+  synthetic-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build synthetic flow
+        run: make clean && make build/psa-cli
+
+      - name: Synthetic test
+        run: make synthetic-test

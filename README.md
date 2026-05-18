@@ -37,6 +37,18 @@ Run full test suite:
 make test
 ```
 
+Run synthetic manifest verification flow (separate from unit tests):
+
+```bash
+make synthetic-test
+```
+
+Verify synthetic files against manifest without regenerating:
+
+```bash
+make synthetic-verify
+```
+
 Clean build artifacts:
 
 ```bash
