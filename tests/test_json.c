@@ -14,15 +14,19 @@
 static int test_file_meta_json(void)
 {
     char out[512];
-    int n = psa_file_meta_to_json("head\"er", "v\\1\n", out, sizeof(out));
-    FAIL_IF(n < 0, "file meta json unexpectedly failed");
+    size_t n = 0;
+    size_t need = 0;
+    int rc = psa_file_meta_to_json("head\"er", "v\\1\n", out, sizeof(out), &n, &need);
+    FAIL_IF(rc != PSA_OK, "file meta json unexpectedly failed rc=%d", rc);
+    FAIL_IF(need != n + 1, "expected need=n+1, got need=%zu n=%zu", need, n);
     FAIL_IF(strstr(out, "\"header\":\"head\\\"er\"") == NULL,
             "header escaping mismatch: %s", out);
     FAIL_IF(strstr(out, "\"version\":\"v\\\\1\\n\"") == NULL,
             "version escaping mismatch: %s", out);
 
-    n = psa_file_meta_to_json("a", "b", out, 8);
-    FAIL_IF(n != -1, "small buffer expected -1, got %d", n);
+    rc = psa_file_meta_to_json("a", "b", out, 8, &n, &need);
+    FAIL_IF(rc != PSA_ERR_NOSPACE, "small buffer expected PSA_ERR_NOSPACE, got %d", rc);
+    FAIL_IF(need > 8 ? 0 : 1, "expected need > 8, got %zu", need);
     return 0;
 }
 
@@ -30,26 +34,29 @@ static int test_record_json(void)
 {
     psa_record_t rec;
     char out[1024];
-    int n;
+    size_t n;
+    size_t need;
+    int rc;
 
     memset(&rec, 0, sizeof(rec));
     rec.type = PSA_REC_DIVIDER;
     rec.rec.divider.id = "ID-1";
     rec.rec.divider.desc_text_1 = "desc\"one";
     rec.rec.divider.undef_text_1 = "a\\b";
-    n = psa_record_to_json(&rec, out, sizeof(out));
-    FAIL_IF(n < 0, "record json unexpectedly failed");
+    rc = psa_record_to_json(&rec, out, sizeof(out), &n, &need);
+    FAIL_IF(rc != PSA_OK, "record json unexpectedly failed rc=%d", rc);
     FAIL_IF(strstr(out, "\"type\":\"Divider\"") == NULL, "type missing: %s", out);
     FAIL_IF(strstr(out, "\"id\":\"ID-1\"") == NULL, "id missing: %s", out);
     FAIL_IF(strstr(out, "desc\\\"one") == NULL, "quote escaping missing: %s", out);
     FAIL_IF(strstr(out, "a\\\\b") == NULL, "backslash escaping missing: %s", out);
 
-    n = psa_record_to_json(&rec, out, 16);
-    FAIL_IF(n != -1, "small buffer expected -1, got %d", n);
+    rc = psa_record_to_json(&rec, out, 16, &n, &need);
+    FAIL_IF(rc != PSA_ERR_NOSPACE, "small buffer expected PSA_ERR_NOSPACE, got %d", rc);
+    FAIL_IF(need > 16 ? 0 : 1, "expected need > 16, got %zu", need);
 
     rec.type = (psa_record_type_t)999;
-    n = psa_record_to_json(&rec, out, sizeof(out));
-    FAIL_IF(n != -1, "invalid type expected -1, got %d", n);
+    rc = psa_record_to_json(&rec, out, sizeof(out), &n, &need);
+    FAIL_IF(rc != PSA_ERR_INVALID_ARG, "invalid type expected PSA_ERR_INVALID_ARG, got %d", rc);
     return 0;
 }
 

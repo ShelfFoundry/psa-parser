@@ -16,12 +16,17 @@ Use the C API from `include/psa.h`.
 Primary entry points:
 
 - `psa_parse_file(...)`: streaming callback API
+- `psa_parse_file_ex(...)`: streaming callback API with explicit safety limits
 - `psa_parse_file_to_json_document(...)`: single JSON document API
 
 Supporting helpers:
 
 - `psa_record_to_json(...)`
 - `psa_file_meta_to_json(...)`
+
+All JSON helpers return `PSA_OK` on success or a negative `PSA_ERR_*` code.
+When the output buffer is too small they return `PSA_ERR_NOSPACE` and set
+`out_needed` to the required byte count (including trailing NUL).
 
 ### Streaming vs Document API
 
@@ -62,6 +67,11 @@ Core return codes:
 - `PSA_ERR_IO` (-1)
 - `PSA_ERR_PARSE` (-2)
 - `PSA_ERR_ABORT` (-3)
+- `PSA_ERR_NOMEM` (-4)
+- `PSA_ERR_INVALID_ARG` (-5)
+- `PSA_ERR_OVERFLOW` (-6)
+- `PSA_ERR_NOSPACE` (-7)
+- `PSA_ERR_NONFINITE` (-8)
 
 Provide an `errbuf` to receive parse/I/O details.
 

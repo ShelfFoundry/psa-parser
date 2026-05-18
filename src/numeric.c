@@ -4,6 +4,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <string.h>
+#include <limits.h>
 
 /* ------------------------------------------------------------------------- */
 /* Helpers                                                                   */
@@ -43,6 +44,9 @@ int psa_parse_int(const char *s, int default_val)
             return default_val;
         end++;
     }
+
+    if (v < INT_MIN || v > INT_MAX)
+        return default_val;
 
     return (int)v;
 }
@@ -93,6 +97,9 @@ double psa_parse_double(const char *s, double default_val)
             return default_val;
         end++;
     }
+
+    if (!isfinite(v))
+        return default_val;
 
     return round(v * 100.0) / 100.0;
 }

@@ -522,7 +522,9 @@ static int test_document_json_api(void)
     char errbuf[1024] = {0};
     size_t cap = 256 * 1024;
     char *doc;
-    int n;
+    size_t n = 0;
+    size_t need = 0;
+    int rc;
     char *project = build_record_line("Project", 213, NULL, 0);
     char *planogram = build_record_line("Planogram", 229, NULL, 0);
     char *product = build_record_line("Product", 274, NULL, 0);
@@ -540,8 +542,9 @@ static int test_document_json_api(void)
 
     doc = malloc(cap);
     FAIL_IF(!doc, "malloc failed");
-    n = psa_parse_file_to_json_document(path, doc, cap, errbuf, sizeof(errbuf));
-    FAIL_IF(n < 0, "document API failed: rc=%d err=%s", n, errbuf);
+    rc = psa_parse_file_to_json_document(path, doc, cap, &n, &need, errbuf, sizeof(errbuf));
+    FAIL_IF(rc != PSA_OK, "document API failed: rc=%d err=%s", rc, errbuf);
+    FAIL_IF(n == 0, "document API wrote empty output");
 
     FAIL_IF(strstr(doc, "\"header\":\"SYNTHETIC HEADER\"") == NULL, "missing header in doc json");
     FAIL_IF(strstr(doc, "\"version\":\"SYNTHETIC VERSION\"") == NULL, "missing version in doc json");
@@ -559,6 +562,29 @@ static int test_document_json_api(void)
     return 0;
 }
 
+static int test_invalid_arguments(void)
+{
+    char errbuf[128] = {0};
+    int rc;
+
+    rc = psa_parse_file(NULL, NULL, NULL, count_cb, NULL, errbuf, sizeof(errbuf));
+    FAIL_IF(rc != PSA_ERR_INVALID_ARG, "expected PSA_ERR_INVALID_ARG for NULL path, got %d", rc);
+
+    rc = psa_parse_file("/tmp/does_not_matter", NULL, NULL, NULL, NULL, errbuf, sizeof(errbuf));
+    FAIL_IF(rc != PSA_ERR_INVALID_ARG, "expected PSA_ERR_INVALID_ARG for NULL callback, got %d", rc);
+
+    rc = psa_record_to_json(NULL, NULL, 0, NULL, NULL);
+    FAIL_IF(rc != PSA_ERR_INVALID_ARG, "expected PSA_ERR_INVALID_ARG for NULL record, got %d", rc);
+
+    rc = psa_file_meta_to_json("h", "v", NULL, 16, NULL, NULL);
+    FAIL_IF(rc != PSA_ERR_INVALID_ARG, "expected PSA_ERR_INVALID_ARG for NULL out, got %d", rc);
+
+    rc = psa_parse_file_to_json_document(NULL, NULL, 0, NULL, NULL, errbuf, sizeof(errbuf));
+    FAIL_IF(rc != PSA_ERR_INVALID_ARG, "expected PSA_ERR_INVALID_ARG for NULL path in doc API, got %d", rc);
+
+    return 0;
+}
+
 int main(void)
 {
     int rc = 0;
@@ -570,6 +596,7 @@ int main(void)
     rc |= test_cli_default_document_and_stream_mode();
     rc |= test_cli_summary_with_synthetic_input();
     rc |= test_document_json_api();
+    rc |= test_invalid_arguments();
 
     if (rc == 0)
         printf("samples: all synthetic tests passed\n");

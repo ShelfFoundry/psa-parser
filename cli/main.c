@@ -26,14 +26,19 @@ static int record_callback(psa_record_t *rec, void *user_data)
         return -1;
     }
 
-    int n = psa_record_to_json(rec, buf, JSON_BUF_SIZE);
-    if (n < 0) {
-        fprintf(stderr, "JSON serialization failed (buffer too small?)\n");
+    size_t n = 0;
+    size_t needed = 0;
+    int rc = psa_record_to_json(rec, buf, JSON_BUF_SIZE, &n, &needed);
+    if (rc != PSA_OK) {
+        if (rc == PSA_ERR_NOSPACE)
+            fprintf(stderr, "JSON serialization failed (need %zu bytes)\n", needed);
+        else
+            fprintf(stderr, "JSON serialization failed (rc=%d)\n", rc);
         free(buf);
         return -1;
     }
 
-    fwrite(buf, 1, (size_t)n, stdout);
+    fwrite(buf, 1, n, stdout);
     fputc('\n', stdout);
     free(buf);
     return 0;
@@ -108,12 +113,19 @@ int main(int argc, char **argv)
         }
 
         int rc;
+        size_t written = 0;
+        size_t needed = 0;
         for (;;) {
-            rc = psa_parse_file_to_json_document(path, doc, doc_cap, errbuf, sizeof(errbuf));
-            if (rc >= 0)
+            rc = psa_parse_file_to_json_document(path, doc, doc_cap,
+                                                 &written, &needed,
+                                                 errbuf, sizeof(errbuf));
+            if (rc == PSA_OK)
                 break;
-            if (rc != -1) {
-                fprintf(stderr, "Parse error: %s\n", errbuf);
+            if (rc != PSA_ERR_NOSPACE) {
+                if (errbuf[0] != '\0')
+                    fprintf(stderr, "Parse error: %s\n", errbuf);
+                else
+                    fprintf(stderr, "Parse failed with rc=%d\n", rc);
                 free(doc);
                 return 1;
             }
@@ -122,7 +134,10 @@ int main(int argc, char **argv)
                 free(doc);
                 return 1;
             }
-            doc_cap *= 2;
+            if (needed > doc_cap)
+                doc_cap = needed;
+            else
+                doc_cap *= 2;
             char *next = realloc(doc, doc_cap);
             if (!next) {
                 fprintf(stderr, "Out of memory\n");
@@ -132,7 +147,7 @@ int main(int argc, char **argv)
             doc = next;
         }
 
-        fwrite(doc, 1, (size_t)rc, stdout);
+        fwrite(doc, 1, written, stdout);
         fputc('\n', stdout);
         free(doc);
         return 0;
@@ -154,11 +169,13 @@ int main(int argc, char **argv)
 
     if (!summary_mode) {
         char meta[4096];
-        int n = psa_file_meta_to_json(header ? header : "",
-                                      version ? version : "",
-                                      meta, sizeof(meta));
-        if (n >= 0) {
-            fwrite(meta, 1, (size_t)n, stdout);
+        size_t n = 0;
+        int mrc = psa_file_meta_to_json(header ? header : "",
+                                        version ? version : "",
+                                        meta, sizeof(meta),
+                                        &n, NULL);
+        if (mrc == PSA_OK) {
+            fwrite(meta, 1, n, stdout);
             fputc('\n', stdout);
         }
     }
@@ -167,7 +184,7 @@ int main(int argc, char **argv)
                             record_callback, &st,
                             errbuf, sizeof(errbuf));
 
-    if (rc != PSA_OK && rc != PSA_ERR_ABORT) {
+    if (rc != PSA_OK) {
         fprintf(stderr, "Parse error: %s\n", errbuf);
         free(header);
         free(version);

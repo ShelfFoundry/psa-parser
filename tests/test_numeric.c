@@ -4,6 +4,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <math.h>
+#include <limits.h>
 
 #define FAIL_IF(cond, ...) do { \
     if (cond) { \
@@ -22,6 +23,10 @@ static int test_int(void)
     FAIL_IF(psa_parse_int("abc", 7) != 7, "invalid int default");
     FAIL_IF(psa_parse_int("  123  ", 0) != 123, "whitespace int");
     FAIL_IF(psa_parse_int("-5", 0) != -5, "negative int");
+    FAIL_IF(psa_parse_int("2147483648", 9) != 9, "overflow int default");
+    FAIL_IF(psa_parse_int("-2147483649", 9) != 9, "underflow int default");
+    FAIL_IF(psa_parse_int("2147483647", 0) != INT_MAX, "int max");
+    FAIL_IF(psa_parse_int("-2147483648", 0) != INT_MIN, "int min");
     return 0;
 }
 
@@ -48,6 +53,12 @@ static int test_double(void)
 
     v = psa_parse_double("44418.38124999999854480848", 0.0);
     FAIL_IF(fabs(v - 44418.38) > 0.001, "high precision double: got %.4f", v);
+
+    v = psa_parse_double("nan", 2.0);
+    FAIL_IF(v != 2.0, "non-finite nan default");
+
+    v = psa_parse_double("inf", 2.0);
+    FAIL_IF(v != 2.0, "non-finite inf default");
     return 0;
 }
 

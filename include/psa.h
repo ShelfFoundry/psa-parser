@@ -12,10 +12,15 @@ extern "C" {
 /* Return codes                                                             */
 /* ======================================================================== */
 
-#define PSA_OK          0
-#define PSA_ERR_IO     -1
-#define PSA_ERR_PARSE  -2
-#define PSA_ERR_ABORT  -3
+#define PSA_OK               0
+#define PSA_ERR_IO          -1
+#define PSA_ERR_PARSE       -2
+#define PSA_ERR_ABORT       -3
+#define PSA_ERR_NOMEM       -4
+#define PSA_ERR_INVALID_ARG -5
+#define PSA_ERR_OVERFLOW    -6
+#define PSA_ERR_NOSPACE     -7
+#define PSA_ERR_NONFINITE   -8
 
 /* ------------------------------------------------------------------------- */
 /* Numeric helpers (also used by internal parsers)                           */
@@ -633,6 +638,12 @@ typedef int (*psa_record_callback)(psa_record_t *record, void *user_data);
 /* Core parsing API                                                         */
 /* ======================================================================== */
 
+typedef struct {
+    size_t max_line_bytes;
+    size_t max_fields;
+    size_t max_document_bytes;
+} psa_parse_limits_t;
+
 /* Parse a PSA file.                                                        */
 /*   path        – filesystem path to the .psa file.                         */
 /*   out_header  – output: pointer to header line (line 0).  May be NULL.  */
@@ -644,9 +655,11 @@ typedef int (*psa_record_callback)(psa_record_t *record, void *user_data);
 /*   errbuf      – buffer for error message on failure.  May be NULL.       */
 /*   errbuf_size – capacity of errbuf.                                      */
 /*                                                                            */
-/* Returns PSA_OK on success, PSA_ERR_IO on I/O failure,                    */
-/* PSA_ERR_PARSE on parse error, or PSA_ERR_ABORT if the callback returned  */
-/* non-zero.                                                                */
+/* Returns PSA_OK on success.                                               */
+/* Returns PSA_ERR_INVALID_ARG for invalid inputs, PSA_ERR_IO for I/O       */
+/* failures, PSA_ERR_NOMEM for allocation failures, PSA_ERR_OVERFLOW for    */
+/* line/field safety-limit failures, PSA_ERR_PARSE for parse errors, or     */
+/* PSA_ERR_ABORT if the callback returned non-zero.                         */
 int psa_parse_file(const char *path,
                    const char **out_header,
                    const char **out_version,
@@ -654,25 +667,45 @@ int psa_parse_file(const char *path,
                    void *user_data,
                    char *errbuf, size_t errbuf_size);
 
+/* Parse a PSA file with explicit safety limits.                            */
+int psa_parse_file_ex(const char *path,
+                      const psa_parse_limits_t *limits,
+                      const char **out_header,
+                      const char **out_version,
+                      psa_record_callback cb,
+                      void *user_data,
+                      char *errbuf, size_t errbuf_size);
+
 /* ======================================================================== */
 /* JSON helpers (used by CLI, but also available to library consumers)     */
 /* ======================================================================== */
 
-/* Serialize a single record into JSON.  Returns number of bytes written,   */
-/* or -1 if out_size is too small.  Does NOT write a trailing newline.      */
-int psa_record_to_json(const psa_record_t *rec, char *out, size_t out_size);
+/* Serialize a single record into JSON.                                     */
+/* Returns PSA_OK on success and writes byte count to out_written.          */
+/* Returns PSA_ERR_NOSPACE and writes required size to out_needed when      */
+/* output buffer is too small. Does NOT write a trailing newline.           */
+int psa_record_to_json(const psa_record_t *rec,
+                       char *out, size_t out_size,
+                       size_t *out_written,
+                       size_t *out_needed);
 
 /* Serialize file metadata into a JSON object.                              */
 int psa_file_meta_to_json(const char *header, const char *version,
-                          char *out, size_t out_size);
+                          char *out, size_t out_size,
+                          size_t *out_written,
+                          size_t *out_needed);
 
 /* Serialize a full PSA file into a single top-level JSON document.
  * The output object contains header/version metadata and per-record-type arrays.
- * Returns number of bytes written, or -1 if out_size is too small, or a negative
- * PSA_ERR_* code on parse/I/O/callback failures.
+ * Returns PSA_OK on success and writes byte count to out_written.
+ * Returns PSA_ERR_NOSPACE and writes required size to out_needed when
+ * output buffer is too small.
+ * Returns PSA_ERR_* on parse/I/O/callback failures.
  */
 int psa_parse_file_to_json_document(const char *path,
                                     char *out, size_t out_size,
+                                    size_t *out_written,
+                                    size_t *out_needed,
                                     char *errbuf, size_t errbuf_size);
 
 #ifdef __cplusplus

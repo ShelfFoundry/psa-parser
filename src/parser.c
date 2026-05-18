@@ -7,6 +7,25 @@
 #include <errno.h>
 #include <unistd.h>
 
+#define PSA_DEFAULT_MAX_LINE_BYTES (8u * 1024u * 1024u)
+#define PSA_DEFAULT_MAX_FIELDS     8192u
+
+static void set_err(char *errbuf, size_t errbuf_size, const char *msg)
+{
+    if (errbuf && errbuf_size > 0)
+        snprintf(errbuf, errbuf_size, "%s", msg);
+}
+
+static size_t count_fields_in_line(const char *buf, size_t len)
+{
+    size_t n = 1;
+    for (size_t i = 0; i < len; i++) {
+        if (buf[i] == ',')
+            n++;
+    }
+    return n;
+}
+
 /* ------------------------------------------------------------------------- */
 /* Internal forward declarations                                             */
 /* ------------------------------------------------------------------------- */
@@ -42,18 +61,35 @@ static int psa_strcasecmp(const char *a, const char *b)
 /* Main parser                                                               */
 /* ------------------------------------------------------------------------- */
 
-int psa_parse_file(const char *path,
-                   const char **out_header,
-                   const char **out_version,
-                   psa_record_callback cb,
-                   void *user_data,
-                   char *errbuf, size_t errbuf_size)
+int psa_parse_file_ex(const char *path,
+                      const psa_parse_limits_t *limits,
+                      const char **out_header,
+                      const char **out_version,
+                      psa_record_callback cb,
+                      void *user_data,
+                      char *errbuf, size_t errbuf_size)
 {
+    if (errbuf && errbuf_size > 0)
+        errbuf[0] = '\0';
+
+    if (!path || !cb || (errbuf_size > 0 && !errbuf)) {
+        set_err(errbuf, errbuf_size, "Invalid arguments");
+        return PSA_ERR_INVALID_ARG;
+    }
+
+    size_t max_line_bytes = PSA_DEFAULT_MAX_LINE_BYTES;
+    size_t max_fields_limit = PSA_DEFAULT_MAX_FIELDS;
+    if (limits) {
+        if (limits->max_line_bytes > 0)
+            max_line_bytes = limits->max_line_bytes;
+        if (limits->max_fields > 0)
+            max_fields_limit = limits->max_fields;
+    }
+
     FILE *fp = fopen(path, "rb");
     if (!fp) {
-        if (errbuf && errbuf_size > 0) {
+        if (errbuf && errbuf_size > 0)
             snprintf(errbuf, errbuf_size, "Cannot open %s: %s", path, strerror(errno));
-        }
         return PSA_ERR_IO;
     }
 
@@ -71,9 +107,8 @@ int psa_parse_file(const char *path,
     size_t scratch_cap = 65536;
     char *scratch = malloc(scratch_cap);
     if (!scratch) {
-        rc = PSA_ERR_IO;
-        if (errbuf && errbuf_size > 0)
-            snprintf(errbuf, errbuf_size, "Out of memory");
+        rc = PSA_ERR_NOMEM;
+        set_err(errbuf, errbuf_size, "Out of memory");
         goto cleanup;
     }
 
@@ -81,13 +116,22 @@ int psa_parse_file(const char *path,
     size_t max_fields = 512;
     fields = malloc(max_fields * sizeof(char *));
     if (!fields) {
-        rc = PSA_ERR_IO;
-        if (errbuf && errbuf_size > 0)
-            snprintf(errbuf, errbuf_size, "Out of memory");
+        rc = PSA_ERR_NOMEM;
+        set_err(errbuf, errbuf_size, "Out of memory");
         goto cleanup;
     }
 
     while ((linelen = getline(&line, &linecap, fp)) != -1) {
+        if ((size_t)linelen > max_line_bytes) {
+            if (errbuf && errbuf_size > 0) {
+                snprintf(errbuf, errbuf_size,
+                         "Line %d exceeds max_line_bytes (%zu)",
+                         line_no + 1, max_line_bytes);
+            }
+            rc = PSA_ERR_OVERFLOW;
+            goto cleanup;
+        }
+
         /* Trim trailing \r and \n */
         size_t len = (size_t)linelen;
         while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
@@ -95,8 +139,18 @@ int psa_parse_file(const char *path,
 
         if (line_no == 0) {
             header = strdup(line);
+            if (!header) {
+                rc = PSA_ERR_NOMEM;
+                set_err(errbuf, errbuf_size, "Out of memory");
+                goto cleanup;
+            }
         } else if (line_no == 1) {
             version = strdup(line);
+            if (!version) {
+                rc = PSA_ERR_NOMEM;
+                set_err(errbuf, errbuf_size, "Out of memory");
+                goto cleanup;
+            }
         }
 
         line_no++;
@@ -110,15 +164,42 @@ int psa_parse_file(const char *path,
             scratch_cap = len * 3 + 1;
             char *new_scratch = realloc(scratch, scratch_cap);
             if (!new_scratch) {
-                rc = PSA_ERR_IO;
-                if (errbuf && errbuf_size > 0)
-                    snprintf(errbuf, errbuf_size, "Out of memory");
+                rc = PSA_ERR_NOMEM;
+                set_err(errbuf, errbuf_size, "Out of memory");
                 goto cleanup;
             }
             scratch = new_scratch;
         }
 
         size_t plen = psa_preprocess_line(line, len, scratch, scratch_cap);
+
+        size_t needed_fields = count_fields_in_line(scratch, plen);
+        if (needed_fields > max_fields) {
+            if (needed_fields > max_fields_limit) {
+                if (errbuf && errbuf_size > 0) {
+                    snprintf(errbuf, errbuf_size,
+                             "Line %d has too many fields (%zu > %zu)",
+                             line_no, needed_fields, max_fields_limit);
+                }
+                rc = PSA_ERR_OVERFLOW;
+                goto cleanup;
+            }
+
+            size_t new_max_fields = max_fields;
+            while (new_max_fields < needed_fields)
+                new_max_fields *= 2;
+            if (new_max_fields > max_fields_limit)
+                new_max_fields = max_fields_limit;
+
+            char **new_fields = realloc(fields, new_max_fields * sizeof(char *));
+            if (!new_fields) {
+                rc = PSA_ERR_NOMEM;
+                set_err(errbuf, errbuf_size, "Out of memory");
+                goto cleanup;
+            }
+            fields = new_fields;
+            max_fields = new_max_fields;
+        }
 
         size_t nfields = psa_split_fields(scratch, plen, fields, max_fields);
         if (nfields == 0)
@@ -213,4 +294,15 @@ cleanup:
     free(line);
     fclose(fp);
     return rc;
+}
+
+int psa_parse_file(const char *path,
+                   const char **out_header,
+                   const char **out_version,
+                   psa_record_callback cb,
+                   void *user_data,
+                   char *errbuf, size_t errbuf_size)
+{
+    return psa_parse_file_ex(path, NULL, out_header, out_version,
+                             cb, user_data, errbuf, errbuf_size);
 }
