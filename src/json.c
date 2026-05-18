@@ -1,5 +1,6 @@
 #include "psa.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
 
@@ -231,4 +232,144 @@ int psa_record_to_json(const psa_record_t *rec, char *out, size_t out_size)
     }
     if (rc < 0) return -1;
     return (int)j.p;
+}
+
+typedef struct {
+    char *buf;
+    size_t len;
+    size_t cap;
+    int count;
+} json_bucket_t;
+
+typedef struct {
+    json_bucket_t buckets[9];
+    int failed;
+} doc_accum_t;
+
+static int bucket_append(json_bucket_t *b, const char *s, size_t n)
+{
+    size_t need = b->len + n + 1;
+    if (need > b->cap) {
+        size_t new_cap = b->cap ? b->cap : 1024;
+        while (new_cap < need)
+            new_cap *= 2;
+        char *new_buf = realloc(b->buf, new_cap);
+        if (!new_buf)
+            return -1;
+        b->buf = new_buf;
+        b->cap = new_cap;
+    }
+
+    memcpy(b->buf + b->len, s, n);
+    b->len += n;
+    b->buf[b->len] = '\0';
+    return 0;
+}
+
+static int document_cb(psa_record_t *rec, void *user_data)
+{
+    doc_accum_t *acc = (doc_accum_t *)user_data;
+    json_bucket_t *b;
+    char *tmp;
+    size_t cap = 4096;
+    int n;
+
+    if ((int)rec->type < 0 || (int)rec->type >= 9) {
+        acc->failed = 1;
+        return 1;
+    }
+
+    tmp = malloc(cap);
+    if (!tmp) {
+        acc->failed = 1;
+        return 1;
+    }
+
+    for (;;) {
+        n = psa_record_to_json(rec, tmp, cap);
+        if (n >= 0)
+            break;
+        if (cap >= 8 * 1024 * 1024) {
+            free(tmp);
+            acc->failed = 1;
+            return 1;
+        }
+        cap *= 2;
+        char *next = realloc(tmp, cap);
+        if (!next) {
+            free(tmp);
+            acc->failed = 1;
+            return 1;
+        }
+        tmp = next;
+    }
+
+    b = &acc->buckets[(int)rec->type];
+    if (b->count > 0 && bucket_append(b, ",", 1) < 0) {
+        free(tmp);
+        acc->failed = 1;
+        return 1;
+    }
+    if (bucket_append(b, tmp, (size_t)n) < 0) {
+        free(tmp);
+        acc->failed = 1;
+        return 1;
+    }
+
+    b->count++;
+    free(tmp);
+    return 0;
+}
+
+int psa_parse_file_to_json_document(const char *path,
+                                    char *out, size_t out_size,
+                                    char *errbuf, size_t errbuf_size)
+{
+    doc_accum_t acc = {0};
+    const char *header = NULL;
+    const char *version = NULL;
+    int rc;
+    int out_n;
+    jb_t jb = { out, 0, out_size };
+    jb_t *j = &jb;
+    const char *array_names[9] = {
+        "projects", "planograms", "fixtures", "products",
+        "positions", "performances", "segments", "drawings", "dividers"
+    };
+
+    rc = psa_parse_file(path, &header, &version, document_cb, &acc, errbuf, errbuf_size);
+    if (rc != PSA_OK) {
+        if (rc == PSA_ERR_ABORT && acc.failed && errbuf && errbuf_size > 0 && errbuf[0] == '\0')
+            snprintf(errbuf, errbuf_size, "Failed to build JSON document");
+        free((void *)header);
+        free((void *)version);
+        for (int i = 0; i < 9; i++)
+            free(acc.buckets[i].buf);
+        return rc;
+    }
+
+    if (japp(j, "{") < 0) { out_n = -1; goto cleanup; }
+    if (japp(j, "\"header\":\"") < 0) { out_n = -1; goto cleanup; }
+    if (jesc(j, header ? header : "") < 0) { out_n = -1; goto cleanup; }
+    if (japp(j, "\",\"version\":\"") < 0) { out_n = -1; goto cleanup; }
+    if (jesc(j, version ? version : "") < 0) { out_n = -1; goto cleanup; }
+    if (japp(j, "\"") < 0) { out_n = -1; goto cleanup; }
+
+    for (int i = 0; i < 9; i++) {
+        if (japp(j, ",\"") < 0) { out_n = -1; goto cleanup; }
+        if (japp(j, array_names[i]) < 0) { out_n = -1; goto cleanup; }
+        if (japp(j, "\":[") < 0) { out_n = -1; goto cleanup; }
+        if (acc.buckets[i].len > 0 && japp(j, acc.buckets[i].buf) < 0) { out_n = -1; goto cleanup; }
+        if (japp(j, "]") < 0) { out_n = -1; goto cleanup; }
+    }
+
+    if (japp(j, "}") < 0) { out_n = -1; goto cleanup; }
+    out_n = (int)jb.p;
+
+cleanup:
+    free((void *)header);
+    free((void *)version);
+    for (int i = 0; i < 9; i++)
+        free(acc.buckets[i].buf);
+    return out_n;
 }

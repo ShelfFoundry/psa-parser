@@ -666,6 +666,15 @@ int psa_record_to_json(const psa_record_t *rec, char *out, size_t out_size);
 int psa_file_meta_to_json(const char *header, const char *version,
                           char *out, size_t out_size);
 
+/* Serialize a full PSA file into a single top-level JSON document.
+ * The output object contains header/version metadata and per-record-type arrays.
+ * Returns number of bytes written, or -1 if out_size is too small, or a negative
+ * PSA_ERR_* code on parse/I/O/callback failures.
+ */
+int psa_parse_file_to_json_document(const char *path,
+                                    char *out, size_t out_size,
+                                    char *errbuf, size_t errbuf_size);
+
 #ifdef __cplusplus
 }
 #endif

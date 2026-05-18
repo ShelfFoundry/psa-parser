@@ -72,15 +72,19 @@ static char *read_line(FILE *fp)
 int main(int argc, char **argv)
 {
     int summary_mode = 0;
+    int document_mode = 0;
     const char *path = NULL;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--summary") == 0 || strcmp(argv[i], "-s") == 0) {
             summary_mode = 1;
+        } else if (strcmp(argv[i], "--document") == 0 || strcmp(argv[i], "-j") == 0) {
+            document_mode = 1;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-            printf("Usage: %s [--summary] <file.psa>\n", argv[0]);
+            printf("Usage: %s [--summary|--document] <file.psa>\n", argv[0]);
             printf("  Outputs one JSON object per line (JSON Lines format).\n");
             printf("  --summary  Print parse statistics to stderr instead of records to stdout.\n");
+            printf("  --document Emit one top-level JSON document.\n");
             return 0;
         } else {
             path = argv[i];
@@ -88,8 +92,53 @@ int main(int argc, char **argv)
     }
 
     if (!path) {
-        fprintf(stderr, "Usage: %s [--summary] <file.psa>\n", argv[0]);
+        fprintf(stderr, "Usage: %s [--summary|--document] <file.psa>\n", argv[0]);
         return 1;
+    }
+
+    if (summary_mode && document_mode) {
+        fprintf(stderr, "--summary and --document cannot be used together\n");
+        return 1;
+    }
+
+    if (document_mode) {
+        size_t doc_cap = 1024 * 1024;
+        char *doc = malloc(doc_cap);
+        char errbuf[1024] = {0};
+        if (!doc) {
+            fprintf(stderr, "Out of memory\n");
+            return 1;
+        }
+
+        int rc;
+        for (;;) {
+            rc = psa_parse_file_to_json_document(path, doc, doc_cap, errbuf, sizeof(errbuf));
+            if (rc >= 0)
+                break;
+            if (rc != -1) {
+                fprintf(stderr, "Parse error: %s\n", errbuf);
+                free(doc);
+                return 1;
+            }
+            if (doc_cap >= 64 * 1024 * 1024) {
+                fprintf(stderr, "JSON document too large\n");
+                free(doc);
+                return 1;
+            }
+            doc_cap *= 2;
+            char *next = realloc(doc, doc_cap);
+            if (!next) {
+                fprintf(stderr, "Out of memory\n");
+                free(doc);
+                return 1;
+            }
+            doc = next;
+        }
+
+        fwrite(doc, 1, (size_t)rc, stdout);
+        fputc('\n', stdout);
+        free(doc);
+        return 0;
     }
 
     /* Pre-read header and version so we can emit metadata first. */
