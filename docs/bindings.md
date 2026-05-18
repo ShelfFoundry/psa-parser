@@ -75,6 +75,17 @@ Core return codes:
 
 Provide an `errbuf` to receive parse/I/O details.
 
+### Error Message Guarantees
+
+For parser/document APIs that accept `errbuf` (`psa_parse_file(...)`,
+`psa_parse_file_ex(...)`, `psa_parse_file_to_json_document(...)`):
+
+- On non-`PSA_OK` return, if `errbuf` is non-NULL and `errbuf_size > 0`,
+  the implementation guarantees a non-empty error message.
+- Caller contract: pass both `errbuf` and a positive `errbuf_size` to receive
+  deterministic diagnostics.
+- If `errbuf == NULL` or `errbuf_size == 0`, no message is written.
+
 ## Numeric and Text Behavior
 
 - Numeric parsing applies documented defaults when input is empty/invalid.
