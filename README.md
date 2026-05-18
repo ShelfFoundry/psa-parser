@@ -22,7 +22,6 @@ No external runtime dependencies are required for the parser library or CLI.
 - `src/`: parser, record mapping, JSON helpers
 - `cli/main.c`: command-line interface
 - `tests/`: unit and synthetic integration tests
-- `docs/spec/`: file format and record mapping specification
 
 ## Development Commands
 
