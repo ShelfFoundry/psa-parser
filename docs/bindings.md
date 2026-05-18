@@ -112,3 +112,5 @@ If your application wants display-specific normalization (for example, convertin
 - Keep your binding layer thin and faithful to C behavior.
 - Perform optional transformations in a separate higher-level layer.
 - Pin against a specific library version/commit in production.
+
+For `0.x` releases, API/ABI stability is best effort while the library matures.

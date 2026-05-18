@@ -22,7 +22,7 @@ No external runtime dependencies are required for the parser library or CLI.
 - `src/`: parser, record mapping, JSON helpers
 - `cli/main.c`: command-line interface
 - `tests/`: unit and synthetic integration tests
-- `spec/`: file format and record mapping specification
+- `docs/spec/`: file format and record mapping specification
 
 ## Development Commands
 
@@ -95,3 +95,10 @@ Help:
   - `psa_parse_buffer_to_json_document(...)` (same contract for in-memory PSA content)
 
 See `include/psa.h` for full API details and record structures.
+
+## Versioning and Compatibility
+
+- Current release target: `v0.1.0`.
+- API/ABI compatibility for `0.x` releases is best effort and may evolve based on implementation feedback.
+- Error code semantics (`PSA_OK`, `PSA_ERR_*`) are intended to remain stable across minor releases.
+- Production consumers should pin to a specific tag or commit.
