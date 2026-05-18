@@ -6,7 +6,7 @@ This project is not affiliated with, endorsed by, or sponsored by Blue Yonder, J
 
 The project does not include proprietary documentation, vendor software, or customer planogram files.
 
-The implementation is based on independent analysis and operational experience with PSA files.
+The implementation is based on independent analysis of PSA files and operational experience with planogram workflows.
 
 ## Requirements
 
@@ -96,7 +96,15 @@ Help:
 
 See `include/psa.h` for full API details and record structures.
 
-## Versioning and Compatibility
+## Compatibility
+
+`psa-parser` is not a complete or official PSA implementation. It supports the subset of PSA records and file structures described in this repository.
+
+Known and unknown record handling should be treated as part of the compatibility surface.
+
+This parser is tested against synthetic fixtures and a limited set of independently analyzed PSA files. Compatibility with all vendor versions is not guaranteed.
+
+## Versioning
 
 - Current release target: `v0.1.0`.
 - API/ABI compatibility for `0.x` releases is best effort and may evolve based on implementation feedback.
